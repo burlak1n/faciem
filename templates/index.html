@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <title>Milvus VK Pipeline</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+            .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+            h1, h2 { color: #333; }
+            label { display: block; margin-top: 10px; }
+            input[type="text"], input[type="number"], select {
+                width: calc(100% - 22px); padding: 10px; margin-top: 5px; border: 1px solid #ddd; border-radius: 4px;
+            }
+            button {
+                background-color: #007bff; color: white; padding: 10px 15px; border: none;
+                border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 20px;
+            }
+            button:hover { background-color: #0056b3; }
+            #progressArea { margin-top: 20px; padding: 0; border: 1px solid #eee; border-radius: 4px; background-color: #f9f9f9; min-height: 100px; max-height: 500px; overflow-y: auto; }
+            .log-item { padding: 10px; border-bottom: 1px solid #ddd; display: flex; align-items: center; gap: 15px; }
+            .log-item:last-child { border-bottom: none; }
+            .log-item img.log-image { max-width: 100px; max-height: 100px; border: 1px solid #ccc; object-fit: cover; cursor: pointer; }
+            .log-item .info { flex-grow: 1; }
+            .log-item .status-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+            .status-processing .status-dot { background-color: #ffc107; }
+            .status-completed .status-dot { background-color: #28a745; }
+            .status-error .status-dot { background-color: #dc3545; }
+            .status-pending .status-dot { background-color: #6c757d; }
+            .log-item.minimized .details, .log-item.minimized img.log-image { /* Можно будет скрыть или уменьшить детали для компактности */ /* opacity: 0.7; */ }
+            .log-item.minimized .photo-id { font-weight: normal; }
+            .log-item.minimized { padding: 5px 10px; background-color: #e9ecef; }
+            .log-item.minimized:hover { background-color: #dee2e6; }
+            .error-message { color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; padding: .75rem 1.25rem; margin-top: 5px; border-radius: .25rem; }
+            .summary-counts { margin-top: 10px; font-size: 0.9em; color: #555; }
+            .search-container { margin-top: 30px; padding-top: 20px; border-top: 1px solid #ccc; }
+            #searchResultsArea {
+                margin-top: 15px;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 15px;
+            }
+            .result-item {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 10px;
+                background-color: #fff;
+                width: 150px; /* Фиксированная ширина для карточки результата */
+                text-align: center;
+            }
+            .result-item img {
+                max-width: 100%;
+                height: 150px; /* Фиксированная высота для единообразия */
+                object-fit: cover;
+                display: block;
+                margin-bottom: 5px;
+                cursor: pointer;
+            }
+            .result-item .placeholder {
+                 width: 100%; height: 150px; background: #eee; display: flex; align-items: center; justify-content: center; font-size: 0.9em; color: #666;
+            }
+             .result-item p { margin: 3px 0; font-size: 0.85em; word-wrap: break-word; }
+            .chart-container {
+                margin-top: 20px;
+                padding: 15px;
+                background-color: #fff;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                box-shadow: 0 0 5px rgba(0,0,0,0.05);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Запуск индексации по альбому</h1>
+            <form id="indexByAlbumForm">
+                <label for="group_select">Выберите группу:</label>
+                <select id="group_select" name="group_id" required>
+                    <option value="">-- Загрузка групп... --</option>
+                </select>
+
+                <label for="album_select">Выберите альбом:</label>
+                <select id="album_select" name="album_id" required disabled>
+                    <option value="">-- Сначала выберите группу --</option>
+                </select>
+
+                <div>
+                    <input type="checkbox" id="skip_existing_album" name="skip_existing" value="true">
+                    <label for="skip_existing_album" style="display: inline; margin-top: 0;">Пропускать существующие фото (по photo_id в Milvus)</label>
+                </div>
+                <button type="button" onclick="startIndexingByAlbum()">Начать индексацию альбома</button>
+            </form>
+
+            <h2>Прогресс индексации:</h2>
+            <div id="overallProgress"></div>
+            <div id="summaryCounts" class="summary-counts"></div>
+            <div id="metricsArea" style="margin-top: 15px; padding: 10px; background-color: #e9ecef; border-radius: 4px;">
+                <h4>Метрики:</h4>
+                <div id="avgTimeMetric">Среднее время обработки лица (эмбеддинг): -</div>
+                <div id="throughputMetric">Пропускная способность: -</div>
+                <div id="totalDurationMetric">Общее время: -</div>
+            </div>
+            <div class="chart-container">
+                <h4>Графики:</h4>
+                <canvas id="embeddingTimeChart"></canvas>
+                <canvas id="progressOverTimeChart" style="margin-top: 20px;"></canvas>
+            </div>
+            <div id="progressArea"></div>
+        </div>
+
+        <div class="container search-container">
+             <h1>Поиск по фото</h1>
+             <form id="searchForm">
+                 <label for="searchImage">Выберите изображение для поиска:</label>
+                 <input type="file" id="searchImage" name="searchImage" accept="image/*" required>
+                 <button type="button" onclick="startSearch()">Найти похожие</button>
+             </form>
+             <div id="searchStatus" style="margin-top: 10px;"><br></div>
+             <div id="searchResultsArea"></div>
+        </div>
+
+        <script>
+            const progressArea = document.getElementById('progressArea');
+            const overallProgress = document.getElementById('overallProgress');
+            const summaryCountsDiv = document.getElementById('summaryCounts');
+            const indexByAlbumForm = document.getElementById('indexByAlbumForm');
+            const groupSelect = document.getElementById('group_select');
+            const albumSelect = document.getElementById('album_select');
+            const skipExistingAlbumCheckbox = document.getElementById('skip_existing_album');
+            const metricsArea = document.getElementById('metricsArea');
+            const avgTimeMetricDiv = document.getElementById('avgTimeMetric');
+            const throughputMetricDiv = document.getElementById('throughputMetric');
+            const totalDurationMetricDiv = document.getElementById('totalDurationMetric');
+            const searchForm = document.getElementById('searchForm');
+            const searchImageInput = document.getElementById('searchImage');
+            const searchStatusDiv = document.getElementById('searchStatus');
+            const searchResultsArea = document.getElementById('searchResultsArea');
+
+            let totalImagesToProcess = 0;
+            let processedImagesCount = 0;
+            let completedSuccessfullyCount = 0;
+            let errorCount = 0;
+            let eventSource = null;
+            let totalEmbeddingTimeMs = 0;
+            let processedFacesForTiming = 0;
+            let startIndexingTime = null;
+            let embeddingTimesData = [];
+            let embeddingChart = null;
+            let chartUpdateTimeout = null;
+
+            // Для нового графика обработанных фотографий по времени
+            let progressOverTimeData = []; // {t: timestamp, y: count}
+            let progressOverTimeChart = null;
+            let progressChartUpdateTimeout = null;
+
+            function formatUnixTimestamp(timestampStr) {
+                if (!timestampStr) return 'N/A';
+                if (!/^\d+$/.test(timestampStr)) {
+                    const directDate = new Date(timestampStr);
+                    if (!isNaN(directDate.getTime())) {
+                         return directDate.toLocaleDateString() + ' ' + directDate.toLocaleTimeString();
+                    }
+                    return timestampStr;
+                }
+                const timestamp = parseInt(timestampStr, 10);
+                if (isNaN(timestamp)) {
+                    return timestampStr;
+                }
+                const date = new Date(timestamp * 1000);
+                const localDate = date.toLocaleDateString();
+                const localTime = date.toLocaleTimeString();
+                return `${localDate} ${localTime}`;
+            }
+
+            function saveState() {
+                const state = {
+                    totalImagesToProcess,
+                    processedImagesCount,
+                    completedSuccessfullyCount,
+                    errorCount,
+                    overallProgressText: overallProgress.innerHTML,
+                    totalEmbeddingTimeMs,
+                    processedFacesForTiming,
+                    startIndexingTime,
+                    embeddingTimesData,
+                    skip_existing: skipExistingAlbumCheckbox.checked,
+                    progressOverTimeData // <--- Сохраняем данные нового графика
+                };
+                sessionStorage.setItem('pipelineState', JSON.stringify(state));
+            }
+
+            function loadState() {
+                const savedState = sessionStorage.getItem('pipelineState');
+                if (savedState) {
+                    try {
+                        const state = JSON.parse(savedState);
+                        totalImagesToProcess = state.totalImagesToProcess || 0;
+                        processedImagesCount = state.processedImagesCount || 0;
+                        completedSuccessfullyCount = state.completedSuccessfullyCount || 0;
+                        errorCount = state.errorCount || 0;
+                        overallProgress.innerHTML = state.overallProgressText || '';
+                        totalEmbeddingTimeMs = state.totalEmbeddingTimeMs || 0;
+                        processedFacesForTiming = state.processedFacesForTiming || 0;
+                        startIndexingTime = state.startIndexingTime || null;
+                        embeddingTimesData = state.embeddingTimesData || [];
+                        skipExistingAlbumCheckbox.checked = state.skip_existing || false;
+                        progressOverTimeData = state.progressOverTimeData || []; // <--- Загружаем данные нового графика
+                        updateSummaryCounts();
+                        if (totalImagesToProcess > 0 && progressArea.innerHTML === '') {
+                            progressArea.innerHTML = '<div style="padding:10px; color: #555;">Статус восстановлен после перезагрузки. Детальный лог потерян. Попытка переподключения к потоку...</div>';
+                        }
+                        if (totalImagesToProcess > 0 && (completedSuccessfullyCount + errorCount < totalImagesToProcess)) {
+                            console.log("Attempting to reconnect to SSE stream after reload...");
+                            listenForProgress();
+                        } else if (totalImagesToProcess > 0) {
+                            overallProgress.innerHTML += '<br>(Статус восстановлен, процесс, вероятно, завершен)';
+                        }
+                        if (embeddingTimesData.length > 0) {
+                            initializeOrUpdateEmbeddingChart();
+                        }
+                        if (progressOverTimeData.length > 0) { // <--- Инициализируем новый график, если есть данные
+                            initializeOrUpdateProgressChart();
+                        }
+                    } catch (e) {
+                        console.error("Error loading state from sessionStorage:", e);
+                        sessionStorage.removeItem('pipelineState');
+                    }
+                }
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+                loadState();
+                fetchGroups();
+            });
+
+            async function fetchGroups() {
+                groupSelect.disabled = true;
+                albumSelect.disabled = true;
+                groupSelect.innerHTML = '<option value="">-- Загрузка групп... --</option>';
+                albumSelect.innerHTML = '<option value="">-- Сначала выберите группу --</option>';
+                try {
+                    const response = await fetch('/api/groups');
+                    if (!response.ok) {
+                        throw new Error(`Ошибка загрузки групп: ${response.status}`);
+                    }
+                    const data = await response.json();
+                    groupSelect.innerHTML = '<option value="">-- Выберите группу --</option>'; 
+                    if (data.groups && data.groups.length > 0) {
+                        data.groups.forEach(group => {
+                            const option = document.createElement('option');
+                            option.value = group.id;
+                            option.textContent = group.name;
+                            groupSelect.appendChild(option);
+                        });
+                        groupSelect.disabled = false;
+                    } else {
+                        groupSelect.innerHTML = '<option value="">-- Группы не найдены --</option>';
+                    }
+                } catch (error) {
+                    console.error('Не удалось загрузить группы:', error);
+                    groupSelect.innerHTML = '<option value="">-- Ошибка загрузки групп --</option>';
+                }
+            }
+
+            groupSelect.addEventListener('change', async function() {
+                const groupId = this.value;
+                albumSelect.disabled = true;
+                albumSelect.innerHTML = '<option value="">-- Загрузка альбомов... --</option>';
+                if (!groupId) {
+                    albumSelect.innerHTML = '<option value="">-- Сначала выберите группу --</option>';
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/albums/${groupId}`);
+                    if (!response.ok) {
+                        throw new Error(`Ошибка загрузки альбомов: ${response.status}`);
+                    }
+                    const data = await response.json();
+                    albumSelect.innerHTML = '<option value="">-- Выберите альбом --</option>';
+                    if (data.albums && data.albums.length > 0) {
+                        data.albums.forEach(album => {
+                            const option = document.createElement('option');
+                            option.value = album.id;
+                            option.textContent = `${album.title} (${album.size === undefined ? 'N/A' : album.size} фото)`;
+                            albumSelect.appendChild(option);
+                        });
+                        albumSelect.disabled = false;
+                    } else {
+                        albumSelect.innerHTML = '<option value="">-- Альбомы не найдены --</option>';
+                    }
+                } catch (error) {
+                    console.error('Не удалось загрузить альбомы для группы:', groupId, error);
+                    albumSelect.innerHTML = '<option value="">-- Ошибка загрузки альбомов --</option>';
+                }
+            });
+
+            async function startIndexingByAlbum() {
+                if (eventSource) {
+                    eventSource.close();
+                    console.log("Previous EventSource closed.");
+                }
+                sessionStorage.removeItem('pipelineState');
+                progressArea.innerHTML = '<div style="padding:10px;">Запуск индексации...</div>';
+                overallProgress.innerHTML = '';
+                summaryCountsDiv.innerHTML = '';
+                totalImagesToProcess = 0;
+                processedImagesCount = 0;
+                completedSuccessfullyCount = 0;
+                errorCount = 0;
+                totalEmbeddingTimeMs = 0;
+                processedFacesForTiming = 0;
+                startIndexingTime = Date.now();
+                embeddingTimesData = [];
+                if (embeddingChart) {
+                    embeddingChart.destroy();
+                    embeddingChart = null;
+                }
+                progressOverTimeData = [];
+                if (progressOverTimeChart) {
+                    progressOverTimeChart.destroy();
+                    progressOverTimeChart = null;
+                }
+                avgTimeMetricDiv.textContent = 'Среднее время обработки лица (эмбеддинг): -';
+                throughputMetricDiv.textContent = 'Пропускная способность: -';
+                totalDurationMetricDiv.textContent = 'Общее время: -';
+
+                const selectedGroupId = groupSelect.value;
+                const selectedAlbumId = albumSelect.value;
+
+                if (!selectedGroupId) {
+                    alert("Пожалуйста, выберите группу.");
+                    return;
+                }
+                if (!selectedAlbumId) {
+                    alert("Пожалуйста, выберите альбом.");
+                    return;
+                }
+
+                const data = {
+                    album_id: selectedAlbumId,
+                    skip_existing: skipExistingAlbumCheckbox.checked
+                };
+                
+                const albumIdentifier = `${selectedGroupId} / ${selectedAlbumId}`;
+                progressArea.innerHTML = `<div style="padding:10px;">Запуск индексации для альбома ${albumIdentifier}...</div>`;
+
+                try {
+                    const response = await fetch('/index/start_by_album', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        progressArea.innerHTML = `<div class="log-item error"><p class="error">Ошибка запуска: ${response.status} - ${errorData.detail || 'Неизвестная ошибка'}</p></div>`;
+                        overallProgress.innerHTML = `<strong class="error">Ошибка запуска: ${errorData.detail || 'Неизвестная ошибка'}</strong>`;
+                        return;
+                    }
+                    const responseData = await response.json();
+                    overallProgress.innerHTML = responseData.message || "Запрос на индексацию отправлен.";
+                    listenForProgress();
+                } catch (error) {
+                     progressArea.innerHTML = `<div class="log-item error"><p class="error">Ошибка сети при запуске: ${error}</p></div>`;
+                     overallProgress.innerHTML = `<strong class="error">Ошибка сети при запуске.</strong>`;
+                }
+            }
+
+            function getStatusClass(status) {
+                if (status.startsWith('error')) return 'status-error';
+                if (status === 'extraction_completed') return 'status-completed';
+                if (status === 'downloaded_processing') return 'status-processing';
+                return 'status-pending';
+            }
+            
+            function getStatusText(status) {
+                switch (status) {
+                    case 'downloaded_processing': return 'Загружено, обработка лиц...';
+                    case 'extraction_completed': return 'Детекция лиц завершена';
+                    case 'error_download': return 'Ошибка загрузки';
+                    case 'error_decode': return 'Ошибка декодирования';
+                    case 'error_extraction': return 'Ошибка детекции лиц';
+                    case 'error_embedding_face': return 'Ошибка получения эмбеддинга';
+                    case 'error_represent_chunk':
+                    case 'error_embedding_mismatch':
+                    case 'error_milvus_insert_chunk':
+                    case 'error_internal_logic': 
+                        return 'Ошибка обработки чанка';
+                    default: return status;
+                }
+            }
+
+            function listenForProgress() {
+                if (eventSource) {
+                    eventSource.close();
+                }
+                eventSource = new EventSource('/index/stream_status');
+
+                eventSource.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.status === 'started') {
+                        totalImagesToProcess = data.total_count || 0;
+                        overallProgress.innerHTML = `Индексация запущена. Всего изображений для обработки: ${totalImagesToProcess}`;
+                        if (!progressArea.innerHTML.includes('восстановлен')) {
+                            progressArea.innerHTML = '';
+                        }
+                        updateSummaryCounts();
+                        return;
+                    }
+
+                    if (data.status === 'finished') {
+                        overallProgress.innerHTML = 'Индексация полностью завершена!';
+                        if (progressArea.innerHTML === '' || progressArea.innerHTML.includes('восстановлен')) {
+                            progressArea.innerHTML = '<div style="padding:10px;">Нет данных для отображения или процесс завершен.</div>';
+                        }
+                        if (data.total_duration_sec !== undefined) {
+                            totalDurationMetricDiv.textContent = `Общее время (финал): ${data.total_duration_sec} сек`;
+                        }
+                        if (data.avg_throughput_photos_sec !== undefined) {
+                            throughputMetricDiv.textContent = `Пропускная способность (финал): ${data.avg_throughput_photos_sec} фото/сек`;
+                        }
+                        updateSummaryCounts();
+                        initializeOrUpdateEmbeddingChart();
+                        initializeOrUpdateProgressChart();
+                        eventSource.close();
+                        return;
+                    }
+                    if (data.status === 'error_critical') {
+                        overallProgress.innerHTML = `<strong class="error">Критическая ошибка сервера: ${data.error_message || 'Неизвестно'}. Индексация остановлена.</strong>`;
+                        updateSummaryCounts();
+                        eventSource.close();
+                        return;
+                    }
+
+                    if (data.photo_id === "CHUNK_ERROR") {
+                        console.warn("Chunk error received:", data.error_message);
+                        return;
+                    }
+
+                    let logItem = document.getElementById(`log-item-${data.photo_id}`);
+                    const isNewItem = !logItem;
+                    if (isNewItem && data.photo_id && data.photo_id !== "null") {
+                        logItem = document.createElement('div');
+                        logItem.id = `log-item-${data.photo_id}`;
+                        logItem.className = 'log-item';
+                        progressArea.prepend(logItem);
+                        processedImagesCount++;
+                    } else if (!logItem) {
+                        console.warn("Log item not found for update:", data);
+                        return;
+                    }
+                    
+                    const statusClass = getStatusClass(data.status);
+                    const isCompleted = statusClass === 'status-completed';
+                    const isError = statusClass === 'status-error';
+                    
+                    if (!logItem.classList.contains('status-error') && !logItem.classList.contains('status-completed')) {
+                        logItem.className = `log-item ${statusClass}`;
+                    } else if (isError && !logItem.classList.contains('status-error')) {
+                        logItem.className = `log-item ${statusClass}`;
+                    }
+
+                    let innerHTML = '';
+                    if (data.image_base64) {
+                        innerHTML += `<img src="data:image/jpeg;base64,${data.image_base64}" alt="Фото ID: ${data.photo_id}" class="log-image" onclick="window.open('${data.url}', '_blank')" title="Нажмите, чтобы открыть оригинал">`;
+                    } else {
+                        const existingImg = logItem.querySelector('.log-image');
+                        if (existingImg) {
+                            innerHTML += existingImg.outerHTML;
+                        } else {
+                            innerHTML += `<div class="log-image placeholder" style="width:100px; height:100px; background:#eee; display:flex; align-items:center; justify-content:center; text-align:center; cursor:pointer;" onclick="window.open('${data.url}', '_blank')" title="Нажмите, чтобы открыть оригинал">Фото<br>(ID: ${data.photo_id})</div>`;
+                        }
+                    }
+
+                    innerHTML += '<div class="info">';
+                    innerHTML += `<div class="photo-id"><span class="status-dot"></span><strong>ID: ${data.photo_id}</strong></div>`;
+                    innerHTML += `<div class="details status-text">Статус: ${getStatusText(data.status)}</div>`;
+                    // Отображение даты фотографии, если она есть
+                    if (data.photo_date) {
+                        innerHTML += `<div class="details photo-date">Дата фото: ${formatUnixTimestamp(data.photo_date)}</div>`;
+                    } else {
+                        // Если дата уже была отображена, но в новом событии ее нет (маловероятно, но для консистентности)
+                        const existingDateDiv = logItem.querySelector('.photo-date');
+                        if (existingDateDiv) {
+                            innerHTML += existingDateDiv.outerHTML;
+                        }
+                    }
+
+                    let facesHTML = '';
+                    if (data.faces_count !== null && data.faces_count !== undefined) {
+                        facesHTML = `<div class="details faces-info">Найдено лиц: ${data.faces_count}`;
+                        if (data.face_confidences && data.face_confidences.length > 0) {
+                            const formattedConfidences = data.face_confidences.map(c => c.toFixed(2));
+                            facesHTML += ` (Conf: [${formattedConfidences.join(', ')}])`;
+                        }
+                        facesHTML += `</div>`;
+                    }
+                    const existingFacesInfo = logItem.querySelector('.faces-info');
+                    if (facesHTML) {
+                        innerHTML += facesHTML;
+                    } else if (existingFacesInfo) {
+                        innerHTML += existingFacesInfo.outerHTML;
+                    }
+
+                    // Добавление информации о статусе embedding_extracted_face
+                    if (data.status === 'embedding_extracted_face' && data.face_index_processed !== undefined && data.embedding_duration_ms !== undefined) {
+                        const embeddingDetailDiv = document.createElement('div');
+                        embeddingDetailDiv.className = 'details embedding-details';
+                        embeddingDetailDiv.textContent = `Лицо #${data.face_index_processed}: эмбеддинг за ${data.embedding_duration_ms.toFixed(1)} мс.`;
+                        
+                        // Если уже есть details-блок, добавляем в него, иначе создаем
+                        let detailsContainer = logItem.querySelector('.info .details-container');
+                        if (!detailsContainer) {
+                            detailsContainer = document.createElement('div');
+                            detailsContainer.className = 'details-container';
+                            // innerHTML += detailsContainer.outerHTML; // Не так, нужно будет добавить в существующий innerHTML
+                        } 
+                        // Этот подход с innerHTML не очень хорошо работает для динамического добавления. 
+                        // Лучше найти контейнер и добавить в него, но т.к. мы пересобираем innerHTML, просто добавим строку.
+                        innerHTML += `<div class="details embedding-details">Лицо #${data.face_index_processed}: эмбеддинг за ${data.embedding_duration_ms.toFixed(1)} мс.</div>`;
+                    } else {
+                        const existingEmbeddingDetails = logItem.querySelector('.embedding-details');
+                        if (existingEmbeddingDetails) {
+                            innerHTML += existingEmbeddingDetails.outerHTML;
+                        }
+                    }
+
+                    if (data.error_message) {
+                        const existingErrorInfo = logItem.querySelector('.error-messages-container') || document.createElement('div');
+                        existingErrorInfo.className = 'error-messages-container';
+                        const newError = document.createElement('div');
+                        newError.className = 'error-message';
+                        newError.textContent = `Ошибка (${data.status}): ${data.error_message}`;
+                        existingErrorInfo.appendChild(newError);
+                        innerHTML += existingErrorInfo.outerHTML;
+                    } else {
+                        const existingErrorInfo = logItem.querySelector('.error-messages-container');
+                        if (existingErrorInfo) innerHTML += existingErrorInfo.outerHTML;
+                    }
+                    innerHTML += '</div>';
+                    logItem.innerHTML = innerHTML;
+
+                    if (isCompleted) {
+                        logItem.classList.add('minimized');
+                        if (!logItem.dataset.countedCompleted && !logItem.dataset.countedError) {
+                            completedSuccessfullyCount++;
+                            logItem.dataset.countedCompleted = true;
+                        }
+                    } else if (isError) {
+                        logItem.classList.remove('minimized');
+                        if (!logItem.dataset.countedError) {
+                            errorCount++;
+                            logItem.dataset.countedError = true;
+                            if(logItem.dataset.countedCompleted) {
+                                completedSuccessfullyCount--;
+                                delete logItem.dataset.countedCompleted;
+                            }
+                        }
+                    }
+
+                    if (data.embedding_duration_ms !== null && data.embedding_duration_ms !== undefined && data.embedding_duration_ms >= 0) {
+                        totalEmbeddingTimeMs += data.embedding_duration_ms;
+                        processedFacesForTiming++;
+                        embeddingTimesData.push(data.embedding_duration_ms);
+                        clearTimeout(chartUpdateTimeout);
+                        chartUpdateTimeout = setTimeout(initializeOrUpdateEmbeddingChart, 500);
+                    }
+
+                    // Обновление данных для графика обработанных фото по времени
+                    if (data.timestamp_msk && data.processed_count !== undefined) {
+                        const timestamp = new Date(data.timestamp_msk);
+                        // Убедимся, что не добавляем дубликаты по времени или что счетчик реально изменился
+                        const lastDataPoint = progressOverTimeData.length > 0 ? progressOverTimeData[progressOverTimeData.length - 1] : null;
+                        if (!lastDataPoint || lastDataPoint.y !== data.processed_count) {
+                             progressOverTimeData.push({t: timestamp, y: data.processed_count});
+                             // Ограничим количество точек для производительности, если нужно
+                             // if (progressOverTimeData.length > 500) progressOverTimeData.shift(); 
+                             clearTimeout(progressChartUpdateTimeout);
+                             progressChartUpdateTimeout = setTimeout(initializeOrUpdateProgressChart, 600); // Немного реже, чем другой график
+                        }
+                    }
+
+                    updateSummaryCounts();
+                };
+
+                eventSource.onerror = function(err) {
+                    console.error("EventSource failed:", err);
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'log-item status-error';
+                    errorDiv.innerHTML = '<p>Ошибка соединения с сервером для получения обновлений. Поток закрыт.</p>';
+                    progressArea.prepend(errorDiv);
+                    eventSource.close();
+                    updateSummaryCounts();
+                };
+            }
+
+            async function startSearch() {
+                const file = searchImageInput.files[0];
+                if (!file) {
+                    searchStatusDiv.textContent = 'Пожалуйста, выберите файл изображения.';
+                    searchStatusDiv.style.color = 'red';
+                    return;
+                }
+
+                searchResultsArea.innerHTML = ''; // Очищаем предыдущие результаты
+                searchStatusDiv.textContent = 'Загрузка файла и поиск...';
+                searchStatusDiv.style.color = 'blue';
+
+                const formData = new FormData();
+                formData.append('file', file); // Имя поля должно совпадать с именем параметра в FastAPI (file)
+
+                try {
+                    const response = await fetch('/search/upload', {
+                        method: 'POST',
+                        body: formData // Отправляем FormData, заголовок Content-Type установится автоматически браузером
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        searchStatusDiv.textContent = `Ошибка поиска: ${response.status} - ${errorData.detail || 'Неизвестная ошибка'}`;
+                        searchStatusDiv.style.color = 'red';
+                        return;
+                    }
+
+                    const data = await response.json();
+                    displaySearchResults(data.results);
+
+                } catch (error) {
+                    console.error("Search fetch error:", error);
+                    searchStatusDiv.textContent = `Сетевая ошибка при поиске: ${error}`;
+                    searchStatusDiv.style.color = 'red';
+                }
+            }
+
+            function displaySearchResults(results) {
+                if (!results || results.length === 0) {
+                    searchStatusDiv.textContent = 'Похожие лица не найдены.';
+                    searchStatusDiv.style.color = 'black';
+                    searchResultsArea.innerHTML = '';
+                    return;
+                }
+
+                searchStatusDiv.textContent = `Найдено совпадений: ${results.length}`;
+                searchStatusDiv.style.color = 'green';
+                searchResultsArea.innerHTML = ''; // Очищаем на всякий случай
+
+                results.forEach(item => {
+                    const div = document.createElement('div');
+                    div.className = 'result-item';
+
+                    let imgHtml = '';
+                    if (item.match_url) {
+                        imgHtml = `<img src="${item.match_url}" alt="Match ID: ${item.match_photo_id}" title="Нажмите, чтобы открыть оригинал" onclick="window.open('${item.match_url}', '_blank')">`;
+                    } else {
+                        imgHtml = `<div class="placeholder">Нет URL<br>(ID: ${item.match_photo_id})</div>`;
+                    }
+
+                    div.innerHTML = `
+                        ${imgHtml}
+                        <p>Photo ID: ${item.match_photo_id}</p>
+                        <p>Face Idx: ${item.match_face_index}</p>
+                        <p>Query Face: ${item.query_face_index}</p>
+                        <p>Similarity: ${item.similarity}</p>
+                        ${item.match_date ? `<p>Дата: ${formatUnixTimestamp(item.match_date)}</p>` : ''}
+                    `;
+                    searchResultsArea.appendChild(div);
+                });
+            }
+
+            function initializeOrUpdateEmbeddingChart() {
+                if (!embeddingTimesData || embeddingTimesData.length === 0) return;
+                
+                const ctx = document.getElementById('embeddingTimeChart').getContext('2d');
+                
+                // Подготовка данных для гистограммы
+                const bins = [0, 50, 100, 150, 200, 300, 500, 1000, Infinity]; // Корзины в мс
+                const labels = bins.slice(0, -1).map((b, i) => `${b}-${bins[i+1] === Infinity ? 'inf' : bins[i+1]} ms`);
+                const dataCounts = Array(labels.length).fill(0);
+
+                embeddingTimesData.forEach(time => {
+                    for (let i = 0; i < bins.length - 1; i++) {
+                        if (time >= bins[i] && time < bins[i+1]) {
+                            dataCounts[i]++;
+                            break;
+                        }
+                    }
+                });
+
+                const chartData = {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Распределение времени обработки лиц (мс)',
+                        data: dataCounts,
+                        backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    }]
+                };
+
+                if (embeddingChart) {
+                    // Обновляем существующий график
+                    embeddingChart.data = chartData;
+                    embeddingChart.update();
+                } else {
+                    // Создаем новый график
+                    embeddingChart = new Chart(ctx, {
+                        type: 'bar',
+                        data: chartData,
+                        options: {
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    title: { display: true, text: 'Количество лиц' }
+                                },
+                                x: {
+                                     title: { display: true, text: 'Время обработки (мс)' }
+                                }
+                            },
+                            animation: {
+                                duration: 0 // Отключаем анимацию для частых обновлений
+                            }
+                        }
+                    });
+                }
+            }
+
+            function initializeOrUpdateProgressChart() {
+                if (!progressOverTimeData || progressOverTimeData.length === 0) return;
+
+                const ctx = document.getElementById('progressOverTimeChart').getContext('2d');
+                const chartConfig = {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: 'Обработано изображений (накопительно)',
+                            data: progressOverTimeData,
+                            borderColor: 'rgb(75, 192, 192)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.5)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: {
+                                    unit: 'minute',
+                                    tooltipFormat: 'll HH:mm:ss',
+                                    displayFormats: {
+                                        minute: 'HH:mm',
+                                        hour: 'HH:mm'
+                                    }
+                                },
+                                title: { display: true, text: 'Время (МСК)' }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                title: { display: true, text: 'Кол-во обработанных' }
+                            }
+                        },
+                        animation: {
+                            duration: 200 // Плавная анимация при обновлении
+                        }
+                    }
+                };
+
+                if (progressOverTimeChart) {
+                    progressOverTimeChart.data.datasets[0].data = progressOverTimeData;
+                    progressOverTimeChart.update();
+                } else {
+                    progressOverTimeChart = new Chart(ctx, chartConfig);
+                }
+            }
+        </script>
+    </body>
+    </html> 

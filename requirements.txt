@@ -1,0 +1,11 @@
+tf-keras
+pymilvus[bulk_writer]
+requests
+numpy
+opencv-python # или opencv-python-headless, если не нужна GUI-часть 
+deepface
+aiohttp
+loguru
+fastapi
+python-multipart
+uvicorn[standard]
