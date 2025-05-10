@@ -38,7 +38,7 @@ LOGURU_FORMAT = (
 
 # --- Настройки локального кэширования изображений ---
 DOWNLOAD_FILES_LOCALLY = True  # Установите True для включения, False для отключения
-LOCAL_DOWNLOAD_PATH = "data/downloaded_images"  # Путь для сохранения скачанных изображений
+LOCAL_DOWNLOAD_PATH = "C:/projects/face/data/downloaded_images"  # Путь для сохранения скачанных изображений
 OVERWRITE_LOCAL_FILES = False # Установите True, если хотите перезаписывать файлы при скачивании, даже если они уже есть локально 
 
 DEEPFACE_CONCURRENCY_LIMIT = os.cpu_count() or 12 # Например, по числу ядер CPU или 4 по умолчанию 
