@@ -49,7 +49,7 @@ cp .env.example .env
 
 ### Локальный запуск
 ```bash
-uvicorn web_server:app --reload
+faciem\backend> python3.12 -m uvicorn web_server:app --reload --port 8000
 ```
 
 ### Запуск через Docker
