@@ -1,47 +1,136 @@
-# Svelte + TS + Vite
+# Frontend для Системы Обработки Фотографий с Поиском Лиц
 
-This template should help get you started developing with Svelte and TypeScript in Vite.
+## Описание
+Frontend-часть системы для автоматизированной обработки изображений с функциями поиска, идентификации и группировки лиц. Современный пользовательский интерфейс, построенный на Svelte, обеспечивает удобную работу с системой распознавания лиц.
 
-## Recommended IDE Setup
+## Технологии
+- **Svelte** - современный фреймворк для создания пользовательских интерфейсов
+- **TypeScript** - типизированный JavaScript
+- **SvelteKit** - фреймворк для создания приложений на Svelte
+- **Chart.js** - библиотека для визуализации данных
+- **TailwindCSS** - утилитарный CSS-фреймворк
+- **ESLint** + **Prettier** - линтинг и форматирование кода
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+## Требования
+- Node.js 16+
+- npm или yarn
+- Современный веб-браузер
 
-## Need an official Svelte framework?
+## Установка
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
-
-## Technical considerations
-
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + TypeScript + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why `global.d.ts` instead of `compilerOptions.types` inside `jsconfig.json` or `tsconfig.json`?**
-
-Setting `compilerOptions.types` shuts out all other types not explicitly listed in the configuration. Using triple-slash references keeps the default TypeScript setting of accepting type information from the entire workspace, while also adding `svelte` and `vite/client` type information.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `allowJs` in the TS template?**
-
-While `allowJs: false` would indeed prevent the use of `.js` files in the project, it does not prevent the use of JavaScript syntax in `.svelte` files. In addition, it would force `checkJs: false`, bringing the worst of both worlds: not being able to guarantee the entire codebase is TypeScript, and also having worse typechecking for the existing JavaScript. In addition, there are valid use cases in which a mixed codebase may be relevant.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/rixo/svelte-hmr#svelte-hmr).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```ts
-// store.ts
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+1. Клонируйте репозиторий:
+```bash
+git clone https://github.com/your-username/faciem.git
+cd faciem/frontend
 ```
+
+2. Установите зависимости:
+```bash
+npm install
+# или
+yarn install
+```
+
+3. Настройте переменные окружения:
+```bash
+cp .env.example .env
+# Отредактируйте .env файл
+```
+
+## Разработка
+
+### Запуск в режиме разработки
+```bash
+npm run dev
+# или
+yarn dev
+```
+
+### Сборка для продакшена
+```bash
+npm run build
+# или
+yarn build
+```
+
+### Предпросмотр собранного приложения
+```bash
+npm run preview
+# или
+yarn preview
+```
+
+## Структура проекта
+```
+frontend/
+├── src/
+│   ├── lib/           # Общие компоненты и утилиты
+│   ├── routes/        # Страницы приложения
+│   ├── stores/        # Svelte stores
+│   ├── styles/        # Глобальные стили
+│   └── app.html       # HTML шаблон
+├── static/            # Статические файлы
+├── tests/             # Тесты
+└── package.json
+```
+
+## Основные функции
+- Загрузка фото через drag-and-drop
+- Галерея с отображением результатов поиска
+- Визуализация найденных лиц с bounding boxes
+- Фильтрация и сортировка результатов
+- Экспорт данных в различных форматах
+- Мониторинг процесса обработки
+
+## Компоненты
+
+### Основные компоненты:
+- `PhotoUploader` - компонент загрузки фото
+- `Gallery` - галерея с результатами
+- `FaceDetector` - отображение найденных лиц
+- `SearchForm` - форма поиска по образцу
+- `ProgressBar` - индикатор прогресса
+- `Statistics` - статистика обработки
+
+## Стилизация
+- Используется TailwindCSS для стилизации
+- Поддерживается темная тема
+- Адаптивный дизайн для всех устройств
+- Анимации и переходы для улучшения UX
+
+## Тестирование
+```bash
+npm run test
+# или
+yarn test
+```
+
+## Линтинг и форматирование
+```bash
+npm run lint
+npm run format
+# или
+yarn lint
+yarn format
+```
+
+## Деплой
+- Автоматический деплой через GitHub Actions
+- Поддержка различных окружений (dev, staging, prod)
+- CDN для статических файлов
+- Мониторинг ошибок через Sentry
+
+## Производительность
+- Оптимизированная загрузка изображений
+- Ленивая загрузка компонентов
+- Кэширование данных
+- Оптимизированный рендеринг списков
+
+## Доступность
+- Поддержка клавиатурной навигации
+- Семантическая разметка
+- ARIA-атрибуты
+- Поддержка скринридеров
+
+## Лицензия
+MIT
