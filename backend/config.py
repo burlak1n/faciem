@@ -11,7 +11,7 @@ DEEPFACE_MODEL_NAME = "Facenet512"  # Используем Facenet512
 DEEPFACE_DETECTOR_BACKEND = "retinaface" # Примеры: 'opencv', 'ssd', 'dlib', 'mtcnn', 'retinaface', 'mediapipe'
 
 # Настройки обработки
-MIN_DET_SCORE = 0.5  # Сниженный порог для уверенности детектора лиц (было 0.98)
+MIN_DET_SCORE = 0.0  # Сниженный порог для уверенности детектора лиц (было 0.98)
 
 # Настройки поиска
 SEARCH_TOP_K = 10
@@ -48,12 +48,12 @@ LOGURU_FORMAT = (
 
 # --- Настройки локального кэширования изображений ---
 DOWNLOAD_FILES_LOCALLY = True  # Установите True для включения, False для отключения
-LOCAL_DOWNLOAD_PATH = "C:/projects/face/data/downloaded_images"  # Путь для сохранения скачанных изображений
+LOCAL_DOWNLOAD_PATH = "data/downloaded_images"  # Путь для сохранения скачанных изображений
 OVERWRITE_LOCAL_FILES = False # Установите True, если хотите перезаписывать файлы при скачивании, даже если они уже есть локально 
 
 # --- Настройки сохранения извлеченных лиц ---
 SAVE_EXTRACTED_FACES = True  # Включить сохранение извлеченных лиц
-EXTRACTED_FACES_PATH = "C:/projects/faciem/data/extracted_faces"  # Путь для сохранения извлеченных лиц
+EXTRACTED_FACES_PATH = "data/extracted_faces"  # Путь для сохранения извлеченных лиц
 FACE_IMAGE_QUALITY = 100  # Качество JPEG для сохраняемых лиц (0-100)
 FACE_IMAGE_SIZE = None  # Размер (ширина и высота) для сохраняемых лиц, если None - сохраняется оригинальный размер
 FACE_COLOR_CONVERT = True  # Преобразовывать RGB->BGR при сохранении (DeepFace обычно возвращает RGB, OpenCV использует BGR)
@@ -123,4 +123,4 @@ if SEARCH_THRESHOLD is None:
 # то пороги нужно будет carefully настраивать и понимать, что сравнивается.
 
 # --- Настройки для OpenCV ---
-OPENCV_DATA_PATH = "C:/Users/Роман/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0/LocalCache/local-packages/Python312/site-packages/cv2/data"  # Путь к директории с данными OpenCV
+OPENCV_DATA_PATH = None

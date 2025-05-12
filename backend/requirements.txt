@@ -10,3 +10,5 @@ fastapi
 python-multipart
 uvicorn[standard]
 opencv-contrib-python
+mediapipe
+facenet-pytorch

@@ -3,6 +3,7 @@ import os
 import sys
 import cv2
 import numpy as np
+import time
 
 # Добавляем текущую директорию в PYTHONPATH для импорта модулей
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from image_processing import init_opencv, init_deepface_model, run_detectors_on_image
 
 # Директория для сохранения обнаруженных лиц
-SAVED_FACES_DIR = "detected_faces_output"
+SAVED_FACES_DIR = "data/detected_faces_output"
 print(cv2.__version__)
 print(hasattr(cv2, 'dnn'))
 async def main():
@@ -35,7 +36,7 @@ async def main():
         if len(image_files) > 1:
             # Берем последний файл по списку из директории (порядок может быть непредсказуем без сортировки)
             # Пользовательский код был image_files[-1]
-            test_image_path = os.path.join(download_dir, image_files[-10])
+            test_image_path = os.path.join(download_dir, image_files[0])
         elif len(image_files) == 1:
             test_image_path = os.path.join(download_dir, image_files[0])
     
@@ -52,17 +53,27 @@ async def main():
     
     # detectors_to_run = ["fastmtcnn"]
 
+    print("\nИзмерение времени выполнения run_detectors_on_image...")
+    start_time_detection = time.perf_counter()
     all_detected_results = await run_detectors_on_image(test_image_path, detectors_to_use=None)
+    end_time_detection = time.perf_counter()
+    detection_duration = end_time_detection - start_time_detection
+    print(f"Функция run_detectors_on_image выполнена за: {detection_duration:.4f} сек")
     
     # Этот print(f"all_detected_results: {all_detected_results}") может выводить очень много данных, особенно если лица - это большие массивы. 
     # Закомментирую его или сделаю более выборочным, если потребуется.
     # print(f"all_detected_results: {all_detected_results}") 
 
     if all_detected_results:
-        print(f"Общее количество обнаруженных объектов лиц (дополнительная фильтрация может потребоваться): {len(all_detected_results)}")
+        print(f"\nОбщее количество обнаруженных объектов лиц (дополнительная фильтрация может потребоваться): {len(all_detected_results)}")
+        
+        print("\nИзмерение времени обработки и сохранения результатов...")
+        start_time_processing = time.perf_counter()
+
         for idx, face_data in enumerate(all_detected_results):
             print(f"  Результат {idx + 1}:")
             print(f"    Детектор: {face_data.detector_name}")
+            print(f"    Время выполнения детектора: {face_data.execution_time:.4f} сек")
             print(f"    Координаты (x,y,w,h): {face_data.bounding_box}")
             
             confidence_str = f"{face_data.confidence:.4f}" if face_data.confidence is not None else "N/A"
@@ -101,6 +112,10 @@ async def main():
                     print(f"      Ошибка при сохранении изображения лица: {e_save}")
             else:
                 print(f"    Изобр. лица: отсутствует")
+        
+        end_time_processing = time.perf_counter()
+        processing_duration = end_time_processing - start_time_processing
+        print(f"\nОбработка и сохранение {len(all_detected_results)} результатов заняли: {processing_duration:.4f} сек")
     else:
         print("Ни один из указанных детекторов не нашел лиц на изображении.")
 

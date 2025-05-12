@@ -22,6 +22,7 @@ except ImportError:
 class DetectedFace:
     detector_name: str
     raw_data: Dict[str, Any] = field(repr=False)  # Store the full original dict from DeepFace
+    execution_time: float = 0.0  # Время работы детектора в секундах
 
     @property
     def bounding_box(self) -> Optional[Dict[str, int]]:
@@ -349,9 +350,7 @@ async def run_detectors_on_image(image_path: str, detectors_to_use: Optional[Lis
     for detector_name in detectors_to_use:
         logger.info(f"Используем детектор: {detector_name}")
         try:
-            # DeepFace.extract_faces возвращает список словарей
-            # Каждый словарь содержит: 'face' (np.array), 'facial_area' (dict с x,y,w,h), 'confidence'
-            # и потенциально другие ключи в зависимости от детектора
+            start_time = time.perf_counter()
             extracted_data_list = await asyncio.to_thread(
                 DeepFace.extract_faces,
                 img_path=image_np,
@@ -359,6 +358,8 @@ async def run_detectors_on_image(image_path: str, detectors_to_use: Optional[Lis
                 enforce_detection=False, 
                 align=False 
             )
+            end_time = time.perf_counter()
+            detector_duration = end_time - start_time
             if extracted_data_list:
                 for i, face_dict_from_deepface in enumerate(extracted_data_list):
                     if not isinstance(face_dict_from_deepface, dict):
@@ -367,7 +368,8 @@ async def run_detectors_on_image(image_path: str, detectors_to_use: Optional[Lis
                     print(f"face_dict_from_deepface: {face_dict_from_deepface}")
                     face_obj = DetectedFace(
                         detector_name=detector_name,
-                        raw_data=face_dict_from_deepface  # Сохраняем весь словарь
+                        raw_data=face_dict_from_deepface,  # Сохраняем весь словарь
+                        execution_time=detector_duration
                     )
                     print(f"face_dict_from_deepface: {face_obj}")
                     all_detected_faces.append(face_obj)
