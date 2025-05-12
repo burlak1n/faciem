@@ -9,3 +9,4 @@ loguru
 fastapi
 python-multipart
 uvicorn[standard]
+opencv-contrib-python

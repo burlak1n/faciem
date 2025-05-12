@@ -2,6 +2,7 @@ import asyncio
 import functools
 import cv2
 import numpy as np
+import os
 from pymilvus import connections, utility, Collection, DataType, FieldSchema, CollectionSchema
 from deepface import DeepFace # DeepFace нужен для search_similar_faces...
 from loguru import logger
@@ -11,11 +12,12 @@ from typing import List, Dict, Any, Optional # Добавил Optional
 try:
     from . import config
     # get_urls_for_photo_ids нужна для search_similar_faces_in_milvus_by_bytes
-    from .db_utils import get_urls_for_photo_ids 
+    from .db_utils import get_urls_for_photo_ids
+    from .image_processing import save_detected_faces
 except ImportError:
     import config
     from db_utils import get_urls_for_photo_ids
-
+    from image_processing import save_detected_faces  # Если не удастся импортировать, будет ошибка
 
 def init_milvus_connection() -> Collection:
     """Устанавливает соединение с Milvus и возвращает объект коллекции."""
@@ -67,7 +69,7 @@ def search_similar_faces_in_milvus(
     milvus_collection: Collection, 
     query_image_path: str, 
     top_k: int = config.SEARCH_TOP_K, 
-    search_threshold: float = config.SEARCH_THRESHOLD_L2
+    search_threshold: float = config.SEARCH_THRESHOLD
 ) -> List[Dict[str, Any]]:
     """Ищет похожие лица в Milvus для лиц, найденных на query_image_path с помощью DeepFace."""
     logger.info(f"Поиск похожих лиц для изображения: {query_image_path}")
@@ -83,13 +85,28 @@ def search_similar_faces_in_milvus(
         return []
 
     try:
+        # Получаем значение alignment из активной конфигурации
+        alignment = config.ACTIVE_MODEL_CONFIG.get("alignment", False)
+        
         # DeepFace.extract_faces блокирующая
         detected_query_faces = DeepFace.extract_faces(
             img_path=query_image_np, 
             detector_backend=config.DEEPFACE_DETECTOR_BACKEND, 
-            align=True,
+            align=alignment,  # Используем значение из конфигурации
             enforce_detection=False 
         )
+        
+        # Сохраняем лица, если настройка включена
+        if config.SAVE_EXTRACTED_FACES and detected_query_faces:
+            # Используем query_image_path как идентификатор запроса для сохранения лиц
+            query_id = os.path.basename(query_image_path).split('.')[0]
+            query_id = f"query_{query_id}"
+            # Запускаем корутину в новом event loop, т.к. функция синхронная
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(save_detected_faces(query_id, detected_query_faces))
+            finally:
+                loop.close()
     except Exception as e:
         if "Face could not be detected" in str(e) or "No face detected" in str(e):
             logger.info(f"Лица не найдены (или ошибка детекции) на query-изображении: {query_image_path}. Сообщение: {e}")
@@ -112,11 +129,14 @@ def search_similar_faces_in_milvus(
             continue
         
         try:
+            # Получаем значение alignment из активной конфигурации
+            alignment = config.ACTIVE_MODEL_CONFIG.get("alignment", False)
+            
             embedding_obj_list = DeepFace.represent(
                 img_path=face_data['face'], 
                 model_name=config.DEEPFACE_MODEL_NAME, 
                 enforce_detection=False,
-                align=True, 
+                align=alignment,  # Используем значение из конфигурации
                 detector_backend=config.DEEPFACE_DETECTOR_BACKEND
             )
 
@@ -177,7 +197,7 @@ async def search_similar_faces_in_milvus_by_bytes(
     milvus_collection: Collection, 
     query_image_bytes: bytes, 
     top_k: int = config.SEARCH_TOP_K, 
-    search_threshold: float = config.SEARCH_THRESHOLD_L2
+    search_threshold: float = config.SEARCH_THRESHOLD
 ) -> List[Dict[str, Any]]:
     """Ищет похожие лица в Milvus для лиц, найденных на query_image (переданном как байты)."""
     logger.info(f"Поиск похожих лиц для изображения (переданного как байты). Размер: {len(query_image_bytes)} байт.")
@@ -198,12 +218,15 @@ async def search_similar_faces_in_milvus_by_bytes(
     # которые будут выполняться в loop.run_in_executor.
     # DeepFace функции блокирующие, поэтому их нужно запускать в executor'е.
     
+    # Получаем значение alignment из активной конфигурации
+    alignment = config.ACTIVE_MODEL_CONFIG.get("alignment", False)
+    
     _partial_extract_faces = functools.partial( # Забыл импортировать functools
         DeepFace.extract_faces,
         # img_path=query_image_np, # передается как аргумент executor'у
         detector_backend=config.DEEPFACE_DETECTOR_BACKEND,
         enforce_detection=False,
-        align=True
+        align=alignment  # Используем значение из конфигурации
     )
 
     _partial_represent_one_face = functools.partial(
@@ -212,13 +235,20 @@ async def search_similar_faces_in_milvus_by_bytes(
         model_name=config.DEEPFACE_MODEL_NAME,
         enforce_detection=False,
         detector_backend=config.DEEPFACE_DETECTOR_BACKEND,
-        align=True
+        align=alignment  # Используем значение из конфигурации
     )
 
     try:
         logger.debug("Запуск детекции лиц на query-изображении...")
         detected_query_faces = await loop.run_in_executor(None, _partial_extract_faces, query_image_np)
         logger.debug(f"Детекция лиц завершена. Найдено: {len(detected_query_faces) if detected_query_faces else 0}")
+        
+        # Сохраняем лица, если настройка включена
+        if config.SAVE_EXTRACTED_FACES and detected_query_faces:
+            # Используем текущее время как идентификатор запроса для сохранения лиц
+            import time
+            query_id = f"query_bytes_{int(time.time())}"
+            await save_detected_faces(query_id, detected_query_faces)
 
     except Exception as e:
         if "Face could not be detected" in str(e) or "No face detected" in str(e):

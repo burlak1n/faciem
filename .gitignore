@@ -96,3 +96,7 @@ volumes/
 *.db-lock
 *.db-lock-wal
 *.db-lock-shm
+opencv_data/
+data/
+detected_faces_output/
+

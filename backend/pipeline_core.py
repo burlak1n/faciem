@@ -19,11 +19,11 @@ from deepface import DeepFace
 try:
     from . import config
     from .download_utils import download_image_async, get_local_path_for_url # get_local_path_for_url нужен для проверки кэша в downloader
-    from .image_processing import run_extraction_task_with_semaphore, run_represent_task_with_semaphore
+    from .image_processing import run_extraction_task_with_semaphore, run_represent_task_with_semaphore, init_opencv, init_deepface_model
 except ImportError:
     import config
     from download_utils import download_image_async, get_local_path_for_url
-    from image_processing import run_extraction_task_with_semaphore, run_represent_task_with_semaphore
+    from image_processing import run_extraction_task_with_semaphore, run_represent_task_with_semaphore, init_opencv, init_deepface_model
 
 # --- Константы и кэш для фиктивного эмбеддинга ---
 NO_FACE_MARKER_FACE_INDEX = -1
@@ -52,12 +52,17 @@ async def get_dummy_embedding(loop: asyncio.AbstractEventLoop, deepface_semaphor
                 # Используем functools.partial для передачи аргументов в run_in_executor
                 # DeepFace.represent принимает numpy массив напрямую как img_path
                 # detector_backend='skip' критичен, т.к. мы не хотим детектировать лица на нашем фиктивном изображении
+                
+                # Получаем значение alignment из активной конфигурации
+                alignment = config.ACTIVE_MODEL_CONFIG.get("alignment", False)
+                
                 partial_represent = functools.partial(
                     DeepFace.represent,
                     img_path=DUMMY_IMAGE_FOR_NO_FACE_REPRESENTATION,
                     model_name=config.DEEPFACE_MODEL_NAME,
                     enforce_detection=False, # Важно, т.к. лиц нет
-                    detector_backend='skip'  # Критически важно для предварительно обработанных/фиктивных лиц
+                    detector_backend=config.DEEPFACE_DETECTOR_BACKEND,  # Критически важно для предварительно обработанных/фиктивных лиц
+                    align=alignment  # Используем значение из конфигурации
                 )
                 # Выполняем в executor, т.к. DeepFace.represent - блокирующая операция
                 embedding_objs = await loop.run_in_executor(None, partial_represent)
@@ -80,25 +85,35 @@ async def process_and_store_faces_async(
     milvus_collection: Collection,
     image_data_tuples: list[tuple[any, str, Optional[str]]],
     progress_callback: Optional[Callable] = None,
-    skip_existing: bool = False
+    skip_existing: bool = False,
+    sequential_mode: bool = True  # Новый параметр для последовательного режима
 ):
     """Асинхронно обрабатывает изображения с использованием конвейера очередей."""
     overall_start_time = time.monotonic()
     total_images_to_process_initially = len(image_data_tuples)
-
+    
+    # Инициализация OpenCV и DeepFace
+    logger.info("Инициализация OpenCV и DeepFace перед началом обработки...")
+    init_opencv()
+    init_deepface_model()
+        
     loop = asyncio.get_event_loop()
     moscow_tz = pytz.timezone('Europe/Moscow')
 
     # --- Инициализация Очередей ---
     download_queue = asyncio.Queue(maxsize=config.QUEUE_MAX_SIZE)
     process_queue = asyncio.Queue(maxsize=config.QUEUE_MAX_SIZE)
-    embed_queue = asyncio.Queue(maxsize=config.QUEUE_MAX_SIZE * 5) # Может быть больше лиц
+    embed_queue = asyncio.Queue(maxsize=config.QUEUE_MAX_SIZE * 5)
     milvus_queue = asyncio.Queue(maxsize=config.QUEUE_MAX_SIZE * 5)
     logger.info(f"Очереди инициализированы с размером {config.QUEUE_MAX_SIZE} (embed/milvus * 5).")
 
-    # --- Инициализация Семафора для DeepFace ---
+    # --- Инициализация Семафоров ---
     deepface_semaphore = asyncio.Semaphore(config.DEEPFACE_CONCURRENCY_LIMIT)
+    # Семафор для последовательного режима
+    sequential_semaphore = asyncio.Semaphore(1) if sequential_mode else None
     logger.info(f"Инициализирован семафор DeepFace с лимитом: {config.DEEPFACE_CONCURRENCY_LIMIT}")
+    if sequential_mode:
+        logger.info("Включен последовательный режим обработки")
 
     # --- Управление состоянием пайплайна ---
     active_tasks = set()
@@ -106,16 +121,13 @@ async def process_and_store_faces_async(
     inserted_counter = 0
     skipped_counter = 0
     error_counter = { 'download': 0, 'processing': 0, 'embedding': 0, 'milvus': 0, 'logic': 0 }
-    # Используем Future для сигнализации о завершении milvus_inserter
     pipeline_finished_future = loop.create_future()
-    # --- Инициализация счетчиков для статистики пайплайна ---
     processed_images_download_count = 0 
     total_faces_extracted_count = 0
     total_faces_embedded_count = 0
-    total_no_face_markers_created_final_count = 0 # <--- Вот здесь его нужно инициализировать
+    total_no_face_markers_created_final_count = 0
 
     # --- Определения Worker Функций ---
-
     async def downloader_worker(
         worker_id: int,
         download_queue: asyncio.Queue,
@@ -123,15 +135,17 @@ async def process_and_store_faces_async(
         session: aiohttp.ClientSession,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     ):
-        """Асинхронный воркер для загрузки изображений."""
         nonlocal processed_counter, skipped_counter, error_counter, processed_images_download_count
         logger.info(f"[Downloader-{worker_id}] Запущен.")
-        failed_images_download_count = 0
-        skipped_existing_count = 0
-        total_processed_in_worker = 0
         while True:
             try:
-                item = await download_queue.get()
+                # Если включен последовательный режим, ждем семафор
+                if sequential_mode:
+                    async with sequential_semaphore:
+                        item = await download_queue.get()
+                else:
+                    item = await download_queue.get()
+
                 if item is None:
                     await process_queue.put(None)
                     download_queue.task_done()
@@ -159,10 +173,16 @@ async def process_and_store_faces_async(
                     # Проверка в Milvus ТОЛЬКО если файл НЕ найден локально (или кэш выключен/перезапись)
                     if not local_file_exists:
                         try:
-                            # Исправляем экранирование символов для строковых ID
-                            milvus_expr = f'photo_id == {photo_id}' if isinstance(photo_id, (int, float)) else f'photo_id == "{str(photo_id).replace("\\", "\\\\").replace('"', '\\"')}"'
+                            # Преобразуем photo_id (строку) в int для запроса к Milvus (поле Int64)
+                            milvus_expr = f'photo_id == {int(photo_id)}'
                             query_start_time = time.monotonic()
-                            check_res = await loop.run_in_executor(None, milvus_collection.query, expr=milvus_expr, output_fields=["photo_id"], limit=1)
+                            query_partial = functools.partial(
+                                milvus_collection.query, 
+                                expr=milvus_expr, 
+                                output_fields=["photo_id"], 
+                                limit=1
+                            )
+                            check_res = await loop.run_in_executor(None, query_partial)
                             query_duration_ms = (time.monotonic() - query_start_time) * 1000
                             logger.debug(f"[BENCHMARK][Downloader-{worker_id}] Milvus check exists (ID: {photo_id}) заняла {query_duration_ms:.2f} мс.")
                             if check_res:
@@ -233,7 +253,13 @@ async def process_and_store_faces_async(
         logger.info(f"[Extractor-{worker_id}] Запущен.")
         while True:
             try:
-                item = await process_queue.get()
+                # Если включен последовательный режим, ждем семафор
+                if sequential_mode:
+                    async with sequential_semaphore:
+                        item = await process_queue.get()
+                else:
+                    item = await process_queue.get()
+
                 if item is None:
                     await embed_queue.put(None)
                     process_queue.task_done()
@@ -262,8 +288,51 @@ async def process_and_store_faces_async(
                         )
                     continue
 
-                # ВАЖНО: run_extraction_task_with_semaphore использует блокирующий DeepFace внутри executor'а
-                # Она уже обернута семафором
+                # Сначала проверяем наличие фото в Milvus
+                try:
+                    # Преобразуем photo_id (строку) в int для запроса к Milvus (поле Int64)
+                    milvus_expr = f'photo_id == {int(photo_id)}'
+                    
+                    # Используем functools.partial для передачи аргументов в run_in_executor
+                    query_partial = functools.partial(
+                        milvus_collection.query, 
+                        expr=milvus_expr, 
+                        output_fields=["photo_id"], 
+                        limit=1
+                    )
+                    check_res = await loop.run_in_executor(None, query_partial)
+                    
+                    if check_res:
+                        logger.info(f"[Extractor-{worker_id}] Фото ID {photo_id} уже существует в Milvus")
+                        # Если нашли фото, отправляем маркер в embed_queue
+                        no_face_marker_item = {
+                            "photo_id": photo_id,
+                            "url": url,
+                            "face_idx": NO_FACE_MARKER_FACE_INDEX,
+                            "face_np": None,
+                            "photo_date": photo_date,
+                            "image_base64": image_base64_cb,
+                            "is_no_face_marker": True
+                        }
+                        await embed_queue.put(no_face_marker_item)
+                        
+                        if progress_callback:
+                            await progress_callback(
+                                status="extraction_skipped_exists",
+                                photo_id=photo_id,
+                                url=url,
+                                image_base64=image_base64_cb,
+                                photo_date=photo_date,
+                                faces_count=0,
+                                timestamp_msk=datetime.datetime.now(moscow_tz).isoformat()
+                            )
+                        process_queue.task_done()
+                        continue
+                except Exception as e:
+                    logger.warning(f"[Extractor-{worker_id}] Ошибка при проверке ID {photo_id} в Milvus: {e}")
+                    # Продолжаем с обычной обработкой, если проверка не удалась
+
+                # Если в Milvus не нашли или произошла ошибка, запускаем RetinaFace
                 ext_photo_id, ext_url, ext_img_base64, ext_photo_date, extraction_result_or_exc = await run_extraction_task_with_semaphore(
                     loop, deepface_semaphore, photo_id, url, image_np, image_base64_cb, photo_date
                 )
@@ -400,7 +469,7 @@ async def process_and_store_faces_async(
                         continue
 
                     milvus_data = {
-                        "photo_id": photo_id,
+                        "photo_id": int(photo_id), # Преобразуем в int
                         "embedding": dummy_emb,
                         "face_index": NO_FACE_MARKER_FACE_INDEX,
                         # "photo_date": photo_date, # Если photo_date хранится на уровне вектора в Milvus
@@ -449,7 +518,7 @@ async def process_and_store_faces_async(
                     else:
                         embedding = embedding_obj_list[0]["embedding"]
                         milvus_data = {
-                            "photo_id": photo_id,
+                            "photo_id": int(photo_id), # Преобразуем в int
                             "embedding": embedding,
                             "face_index": face_idx
                         }
@@ -555,28 +624,25 @@ async def process_and_store_faces_async(
     # --- Логика Оркестровки ---
     logger.info("Запуск worker'ов пайплайна...")
     session = None
-    # Переменные для статистики, которые раньше были глобальными для функции
-    # processed_images_download_count = 0 # Уже инициализирован выше
-    # total_faces_extracted_count = 0   # Уже инициализирован выше
-    # total_faces_embedded_count = 0    # Уже инициализирован выше
-    # total_no_face_markers_created_final_count = 0 # Уже инициализирован выше
     
     try:
-        # TODO: Рассмотреть создание сессии с настройками коннектора из config
         session = aiohttp.ClientSession()
 
-        # Создаем задачи для worker'ов
-        for i in range(config.DOWNLOAD_WORKERS):
+        # В последовательном режиме запускаем только по одному воркеру
+        workers_count = 1 if sequential_mode else config.DOWNLOAD_WORKERS
+        for i in range(workers_count):
             task = asyncio.create_task(downloader_worker(i + 1, download_queue, process_queue, session, progress_callback))
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
 
-        for i in range(config.EXTRACTION_WORKERS):
+        workers_count = 1 if sequential_mode else config.EXTRACTION_WORKERS
+        for i in range(workers_count):
             task = asyncio.create_task(face_extraction_worker(i + 1))
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
 
-        for i in range(config.EMBEDDING_WORKERS):
+        workers_count = 1 if sequential_mode else config.EMBEDDING_WORKERS
+        for i in range(workers_count):
             task = asyncio.create_task(embedding_worker(i + 1))
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
@@ -585,7 +651,7 @@ async def process_and_store_faces_async(
         active_tasks.add(inserter_task)
         inserter_task.add_done_callback(active_tasks.discard)
 
-        logger.info(f"Запущено: {config.DOWNLOAD_WORKERS} downloader'ов, {config.EXTRACTION_WORKERS} extractor'ов, {config.EMBEDDING_WORKERS} embedder'ов, 1 milvus_inserter.")
+        logger.info(f"Запущено: {workers_count} downloader'ов, {workers_count} extractor'ов, {workers_count} embedder'ов, 1 milvus_inserter.")
 
         # Заполнение начальной очереди
         logger.info(f"Добавление {len(image_data_tuples)} URL в очередь скачивания...")
@@ -594,9 +660,9 @@ async def process_and_store_faces_async(
         logger.info("Все URL добавлены в очередь скачивания.")
 
         # Сигнал о завершении для downloader'ов
-        for _ in range(config.DOWNLOAD_WORKERS):
+        for _ in range(workers_count):
             await download_queue.put(None)
-        logger.info(f"Отправлены сигналы завершения ({config.DOWNLOAD_WORKERS}) в download_queue.")
+        logger.info(f"Отправлены сигналы завершения ({workers_count}) в download_queue.")
 
         # Ожидание завершения обработки всех очередей
         logger.info("Ожидание завершения обработки всех очередей...")
@@ -699,7 +765,22 @@ async def process_and_store_faces_async(
 
         if progress_callback:
             final_time_msk = datetime.datetime.now(moscow_tz).isoformat()
+            
+            # Определяем значения для обязательных полей photo_id, url, image_base64
+            # Для финального сообщения они могут быть нерелевантны, но нужны по сигнатуре
+            summary_photo_id = None
+            summary_url = "pipeline_summary"
+            summary_image_base64 = None
+            
+            # Если есть данные, можно попробовать взять первый URL как контекст
+            # if image_data_tuples:
+            #    summary_photo_id = image_data_tuples[0][0]
+            #    summary_url = image_data_tuples[0][1] 
+
             await progress_callback(
+                photo_id=summary_photo_id, 
+                url=summary_url, 
+                image_base64=summary_image_base64,
                 status="finished",
                 processed_count=processed_counter,
                 total_count=total_images_to_process_initially,

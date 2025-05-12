@@ -1,5 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AlbumPhotos from './AlbumPhotos.svelte';
+  
+  interface Photo {
+    id: number;
+    url: string;
+    date?: string;
+    status: string;
+  }
   
   interface Group {
     id: string;
@@ -7,17 +15,20 @@
   }
 
   interface Album {
-    id: string;
+    id: number;
     title: string;
     size?: number;
+    processed_count?: number;
+    sample_photos?: Photo[];
   }
   
   let groups: Group[] = [];
   let albums: Album[] = [];
   let selectedGroupId = '';
-  let selectedAlbumId = '';
+  let selectedAlbumId: number | null = null;
   let skipExisting = false;
   let loading = false;
+  let showPhotos = false;
 
   onMount(async () => {
     await fetchGroups();
@@ -51,7 +62,7 @@
   }
 
   async function startIndexing() {
-    if (!selectedGroupId || !selectedAlbumId) {
+    if (!selectedGroupId || selectedAlbumId === null) {
       alert('Пожалуйста, выберите группу и альбом');
       return;
     }
@@ -78,9 +89,31 @@
       loading = false;
     }
   }
+  
+  function getAlbumStatus(album: Album): string {
+    if (!album.processed_count || !album.size) return 'не обработан';
+    
+    const percent = Math.round((album.processed_count / album.size) * 100);
+    if (percent >= 100) return 'полностью обработан';
+    if (percent > 0) return `обработано ${percent}%`;
+    return 'не обработан';
+  }
 
   $: if (selectedGroupId) {
     fetchAlbums(selectedGroupId);
+  }
+  
+  $: if (selectedAlbumId !== null) {
+    console.log(`IndexingForm: выбран альбом ${selectedAlbumId}`);
+    showPhotos = true;
+  } else {
+    showPhotos = false;
+  }
+
+  // Обработчик изменения альбома отдельно от реактивного выражения
+  function handleAlbumChange() {
+    console.log(`IndexingForm: изменен альбом на ${selectedAlbumId}`);
+    // Если нужно еще какие-то действия при изменении альбома
   }
 </script>
 
@@ -105,13 +138,14 @@
     <select 
       id="album_select" 
       bind:value={selectedAlbumId} 
+      on:change={handleAlbumChange}
       required
       disabled={!selectedGroupId || loading}
     >
-      <option value="">-- Выберите альбом --</option>
+      <option value={null}>-- Выберите альбом --</option>
       {#each albums as album}
         <option value={album.id}>
-          {album.title} ({album.size === undefined ? 'N/A' : album.size} фото)
+          {album.title} ({album.size === undefined ? 'N/A' : album.size} фото, {getAlbumStatus(album)})
         </option>
       {/each}
     </select>
@@ -129,10 +163,17 @@
     </label>
   </div>
 
-  <button type="submit" disabled={loading}>
+  <button type="submit" disabled={loading || !selectedAlbumId}>
     {loading ? 'Запуск...' : 'Начать индексацию альбома'}
   </button>
 </form>
+
+{#if showPhotos && selectedAlbumId !== null}
+  <div class="album-photos-container">
+    <h3>Фотографии альбома</h3>
+    <AlbumPhotos albumId={selectedAlbumId} key={selectedAlbumId} />
+  </div>
+{/if}
 
 <style>
   .form-group {
@@ -181,5 +222,16 @@
   button:disabled {
     background-color: #ccc;
     cursor: not-allowed;
+  }
+
+  .album-photos-container {
+    margin-top: 30px;
+    padding-top: 15px;
+    border-top: 1px solid #ddd;
+  }
+  
+  h3 {
+    margin-bottom: 15px;
+    color: #333;
   }
 </style> 
