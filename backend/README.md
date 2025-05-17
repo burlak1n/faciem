@@ -46,7 +46,7 @@ cp .env.example .env
 ```
 
 ## Запуск
-
+python face_database.py --add data/database_faces
 ### Локальный запуск
 ```bash
 faciem\backend> python3.12 -m uvicorn web_server:app --reload --port 8000

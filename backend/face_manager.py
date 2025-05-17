@@ -1,10 +1,12 @@
 import os
 import numpy as np
 from sklearn.cluster import DBSCAN
+import hdbscan
 from sklearn.metrics.pairwise import cosine_distances
 from deepface import DeepFace
 from loguru import logger
 import sys
+from typing import List, Dict, Any, Optional
 
 # Импортируем все необходимые функции и константы из модуля milvus
 from milvus import (
@@ -16,13 +18,15 @@ from milvus import (
     get_cluster_members,
     MilvusClient, # Импортируем для аннотации типа
     COLLECTION_NAME,
-    FACE_ID_FIELD,
     EMBEDDING_FIELD,
-    PERSON_ID_FIELD,
-    DEFAULT_PERSON_ID,
-    PRIMARY_KEY_FIELD
+    PERSON_ID_FIELD, # Тип изменен на INT64
+    DEFAULT_PERSON_ID, # Значение изменено на 0
+    PRIMARY_KEY_FIELD,
+    PHOTO_ID_FIELD,
+    FACE_INDEX_FIELD,
+    DEFAULT_SEARCH_TOP_K,
+    DEFAULT_SIMILARITY_THRESHOLD
 )
-
 # Настройка логгера (можно вынести в отдельный модуль логгирования)
 LOG_FILE = "face_manager.log"
 logger.remove()
@@ -52,100 +56,91 @@ class FaceManager:
         else:
              logger.info(f"FaceManager инициализирован. Model: {self.model_name}, Detector: {self.detector_backend}, Milvus OK.")
 
-    def _extract_embedding(self, image_path_or_url: str) -> list[list[float]]:
+    def _extract_embedding(self, image_path_or_url: str) -> List[Dict[str, Any]]:
         """
-        Извлекает и нормализует все эмбеддинги лиц из изображения. (Приватный метод)
-
-        Args:
-            image_path_or_url: Локальный путь или URL изображения.
-
-        Returns:
-            Список нормализованных эмбеддингов или пустой список.
+        Извлекает эмбеддинги для ВСЕХ лиц на изображении.
+        Возвращает список словарей, каждый содержит 'embedding' и 'facial_area'.
+        Если лица не найдены или произошла ошибка, возвращает пустой список.
         """
-        if not self.client:
-            logger.error("Milvus client не инициализирован в _extract_embedding.")
-            return []
-            
-        embeddings = []
         try:
-            # Используем параметры из self
+            # enforce_detection=False позволяет обрабатывать изображения без лиц (вернет пустой список)
+            # align=True используется по умолчанию и рекомендуется
             embedding_objs = DeepFace.represent(
                 img_path=image_path_or_url,
                 model_name=self.model_name,
                 detector_backend=self.detector_backend,
-                enforce_detection=False,
+                enforce_detection=False, 
                 align=True
             )
-            if not embedding_objs:
-                logger.warning(f"Лица не найдены на: {image_path_or_url}")
+            DeepFace.verify
+            # DeepFace.represent возвращает список словарей
+            if isinstance(embedding_objs, list) and len(embedding_objs) > 0:
+                # Убедимся, что каждый объект содержит нужный ключ 'embedding'
+                valid_embeddings = [obj for obj in embedding_objs if isinstance(obj, dict) and 'embedding' in obj]
+                if len(valid_embeddings) != len(embedding_objs):
+                    logger.warning(f"Некоторые объекты, возвращенные DeepFace для {image_path_or_url}, не содержали ключ 'embedding'.")
+                return valid_embeddings
+            else:
+                logger.info(f"Лица не найдены или не удалось извлечь эмбеддинги для: {image_path_or_url}")
                 return []
-
-            logger.debug(f"Найдено {len(embedding_objs)} лиц на {image_path_or_url}")
-            for i, obj in enumerate(embedding_objs):
-                embedding = obj.get('embedding')
-                if not embedding:
-                     logger.warning(f"Отсутствует 'embedding' для лица #{i} на {image_path_or_url}. Пропуск.")
-                     continue
-                
-                embedding_np = np.array(embedding)
-                norm = np.linalg.norm(embedding_np)
-                if norm == 0:
-                   logger.warning(f"Нулевой вектор эмбеддинга для лица #{i} на {image_path_or_url}. Пропуск.")
-                   continue
-                normalized_embedding = embedding_np / norm
-                embeddings.append(normalized_embedding.tolist())
-            return embeddings
         except Exception as e:
-            # Логируем URL/путь для отладки
-            error_source = image_path_or_url if len(image_path_or_url) < 100 else image_path_or_url[:100] + "..."
-            logger.error(f"Ошибка при извлечении эмбеддингов из '{error_source}': {e}", exc_info=True)
+            logger.error(f"Ошибка при извлечении эмбеддинга для {image_path_or_url}: {e}", exc_info=True)
             return []
 
-    def add_face(self, image_path_or_url: str, base_face_id: str | None = None) -> list | None:
+    def add_face(self, image_path_or_url: str, photo_id: int) -> Optional[int]:
         """
-        Извлекает эмбеддинги из изображения и добавляет их в базу Milvus.
+        Обнаруживает все лица на изображении, извлекает эмбеддинги и добавляет их в Milvus.
+        Сохраняет photo_id и face_index для каждой записи.
 
         Args:
-            image_path_or_url: Локальный путь или URL изображения.
-            base_face_id: Базовый ID для лица (обычно имя файла). Если None, используется имя файла из пути.
+            image_path_or_url: Путь к локальному файлу или URL изображения.
+            photo_id: ID фотографии из внешней системы (например, vk_faces.db).
+                      Теперь это обязательный параметр.
 
         Returns:
-            Список PK добавленных записей или None в случае ошибки Milvus.
+            Количество успешно добавленных лиц, или None в случае ошибки Milvus.
         """
-        if not self.client:
-            logger.error("Milvus client не инициализирован в add_face.")
-            return None
-
-        if base_face_id is None:
-            if '/' in image_path_or_url or '\\' in image_path_or_url: # Проверяем, похоже ли на путь
-                base_face_id = os.path.basename(image_path_or_url)
-            else: # Иначе считаем, что это URL или просто ID
-                 base_face_id = "image" # Нужен какой-то ID по умолчанию
-
-        embeddings = self._extract_embedding(image_path_or_url)
-        if not embeddings:
-            logger.info(f"Не найдено валидных лиц для добавления из {base_face_id}.")
-            return [] # Возвращаем пустой список, т.к. ошибки не было, просто нечего добавлять
+        embedding_objs = self._extract_embedding(image_path_or_url)
+        if not embedding_objs:
+            return 0 # Лица не найдены или ошибка извлечения, 0 добавлено
 
         data_to_insert = []
-        for i, embedding in enumerate(embeddings):
-            face_id = f"{base_face_id}_{i}"
+        added_count = 0
+        
+        # photo_id теперь всегда предоставляется и является int
+        # photo_id_value = photo_id # Просто используем photo_id напрямую
+
+        for i, obj in enumerate(embedding_objs):
+            embedding = obj.get('embedding')
+            if embedding is None:
+                logger.warning(f"Пропущен объект {i} для {image_path_or_url} из-за отсутствия 'embedding'")
+                continue
+                
             data_to_insert.append({
-                FACE_ID_FIELD: face_id,
                 EMBEDDING_FIELD: embedding,
-                # PERSON_ID_FIELD будет установлен по умолчанию в insert_data (через collection.insert)
+                PERSON_ID_FIELD: DEFAULT_PERSON_ID, # Теперь это 0 (int)
+                PHOTO_ID_FIELD: photo_id, # Используем напрямую photo_id
+                FACE_INDEX_FIELD: i 
             })
-            logger.debug(f"Подготовлено к добавлению: ID={face_id}")
+            added_count += 1
 
-        if data_to_insert:
-            # Используем функцию insert_data из модуля milvus
-            pks = insert_data(self.client, data_to_insert) # insert_data сама логирует успех/ошибку
-            return pks
+        if not data_to_insert:
+            logger.warning(f"Нет данных для вставки в Milvus для {image_path_or_url}")
+            return 0
+
+        logger.debug(f"Подготовлено {len(data_to_insert)} записей для вставки в Milvus.")
+        # Вызываем функцию вставки из milvus.py
+        insert_result = insert_data(self.client, data_to_insert) # Передаем client и список словарей
+
+        if insert_result is not None:
+            actual_inserted_count = len(insert_result) # insert_result это список PK
+            logger.info(f"Успешно добавлено {actual_inserted_count} лиц для {image_path_or_url} с photo_id={photo_id}, person_id={DEFAULT_PERSON_ID}")
+            return actual_inserted_count 
         else:
-            logger.warning(f"Нет данных для вставки для {base_face_id}.")
-            return []
+            logger.error(f"Ошибка при вставке данных в Milvus для {image_path_or_url}")
+            return None
 
-    def search_face(self, query_image_path_or_url: str, top_k: int, similarity_threshold: float) -> dict:
+    def search_face(self, query_image_path_or_url: str, top_k: int = DEFAULT_SEARCH_TOP_K, similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> Dict[str, Any]:
         """
         Ищет похожие лица в базе Milvus по изображению-запросу.
 
@@ -166,21 +161,26 @@ class FaceManager:
             logger.error("Milvus client не инициализирован в search_face.")
             return {"direct_hits": [], "cluster_members": {}}
 
-        query_embeddings = self._extract_embedding(query_image_path_or_url)
-        if not query_embeddings:
-            error_source = query_image_path_or_url if len(query_image_path_or_url) < 100 else query_image_path_or_url[:100] + "..."
-            logger.error(f"Не удалось извлечь эмбеддинги из запроса: '{error_source}'")
+        query_embedding_objs = self._extract_embedding(query_image_path_or_url)
+        if not query_embedding_objs:
+            # Логгируем, если _extract_embedding не вернул объекты
+            error_source_log = query_image_path_or_url if len(query_image_path_or_url) < 100 else query_image_path_or_url[:100] + "..."
+            logger.info(f"Не удалось извлечь эмбеддинги из запроса (или нет лиц): '{error_source_log}'")
             return {"direct_hits": [], "cluster_members": {}}
 
-        logger.info(f"Найдено {len(query_embeddings)} лиц в запросе. Поиск top {top_k}...")
+        # Извлекаем непосредственно векторы для передачи в search_data
+        actual_query_vectors = [obj['embedding'] for obj in query_embedding_objs]
+        # _extract_embedding гарантирует, что каждый obj содержит ключ 'embedding'
+        
+        logger.info(f"Найдено {len(actual_query_vectors)} лиц в запросе. Поиск top {top_k}...")
 
         direct_hits = []
         found_person_ids = set()
         unique_direct_hit_pks = set() # Чтобы не дублировать результаты по PK
 
         try:
-            # Используем search_data из модуля milvus
-            search_results = search_data(self.client, query_embeddings, top_k)
+            # Передаем actual_query_vectors (список векторов) в search_data
+            search_results = search_data(self.client, actual_query_vectors, top_k)
 
             for i, hits_list in enumerate(search_results):
                 if not hits_list: continue
@@ -190,33 +190,30 @@ class FaceManager:
                     if not entity: continue
                     
                     db_pk = entity.get(PRIMARY_KEY_FIELD)
-                    if db_pk is None: continue # Пропускаем, если нет PK
+                    if db_pk is None: continue 
 
-                    # Отбираем только те, что выше порога и еще не были добавлены
                     if similarity >= similarity_threshold and db_pk not in unique_direct_hit_pks:
-                        face_id = entity.get(FACE_ID_FIELD, "N/A")
-                        person_id = entity.get(PERSON_ID_FIELD, DEFAULT_PERSON_ID)
+                        photo_id = entity.get(PHOTO_ID_FIELD, -1)
+                        face_index = entity.get(FACE_INDEX_FIELD, -1)
+                        person_id = entity.get(PERSON_ID_FIELD, DEFAULT_PERSON_ID) # Будет int (0 по умолчанию)
                         
                         direct_hits.append({
                             "pk": db_pk,
-                            "face_id": face_id, # Сохраняем полный face_id (с индексом)
-                            "person_id": person_id,
+                            "photo_id": photo_id, 
+                            "face_index": face_index, 
+                            "person_id": person_id, # Теперь int
                             "similarity": similarity,
-                            "query_face_idx": i # Индекс лица в запросе, которое дало это совпадение
+                            "query_face_idx": i 
                         })
                         unique_direct_hit_pks.add(db_pk)
-                        logger.info(f"  -> Прямое совпадение: PK:{db_pk}, ID:{face_id}, PersonID:{person_id}, Sim:{similarity:.4f} (лицо запроса #{i})")
-                        # Собираем ID кластеров, для которых нужны все члены
-                        if person_id != DEFAULT_PERSON_ID:
-                            found_person_ids.add(person_id)
+                        logger.info(f"  -> Прямое совпадение: PK:{db_pk}, PhotoID:{photo_id}, FaceIdx:{face_index}, PersonID:{person_id}, Sim:{similarity:.4f} (лицо запроса #{i}) ")
+                        if person_id != DEFAULT_PERSON_ID: # Сравниваем с 0
+                            found_person_ids.add(person_id) # person_id теперь int
                     elif db_pk in unique_direct_hit_pks:
                          logger.debug(f"    Пропуск (уже найдено): PK:{db_pk}")
-                    # else: # Логирование не прошедших порог можно убрать для чистоты
-                    #     logger.debug(f"    Ниже порога ({similarity:.4f} < {similarity_threshold}): PK:{db_pk}")
 
             direct_hits.sort(key=lambda x: x['similarity'], reverse=True)
 
-            # Используем get_cluster_members из модуля milvus
             cluster_members_data = get_cluster_members(self.client, found_person_ids)
 
             logger.info(f"Итого найдено {len(direct_hits)} прямых совпадений (выше порога {similarity_threshold}) для запроса.")
@@ -234,7 +231,7 @@ class FaceManager:
         logger.info(f"Полная кластеризация: извлечение всех данных...")
         all_entities_data = query_data(
             self.client, filter_expression="", 
-            output_fields=[PRIMARY_KEY_FIELD, FACE_ID_FIELD, EMBEDDING_FIELD], limit=None
+            output_fields=[PRIMARY_KEY_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD, EMBEDDING_FIELD], limit=None
         )
         logger.info(f"Извлечено {len(all_entities_data)} записей.")
         return all_entities_data
@@ -242,11 +239,11 @@ class FaceManager:
     def _get_unclustered_faces(self) -> list:
         """Извлекает лица с person_id = DEFAULT_PERSON_ID."""
         if not self.client: return []
-        logger.info(f"Инкрементальная кластеризация: извлечение некластеризованных лиц...")
-        unclustered_filter = f"{PERSON_ID_FIELD} == '{DEFAULT_PERSON_ID}'"
+        logger.info(f"Инкрементальная кластеризация: извлечение некластеризованных лиц (PersonID={DEFAULT_PERSON_ID})...")
+        unclustered_filter = f"{PERSON_ID_FIELD} == {DEFAULT_PERSON_ID}" # Сравнение с числом
         unclustered_faces_data = query_data(
             self.client, filter_expression=unclustered_filter,
-            output_fields=[PRIMARY_KEY_FIELD, FACE_ID_FIELD, EMBEDDING_FIELD], limit=None
+            output_fields=[PRIMARY_KEY_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD, EMBEDDING_FIELD], limit=None
         )
         logger.info(f"Извлечено {len(unclustered_faces_data)} некластеризованных записей.")
         return unclustered_faces_data
@@ -254,8 +251,8 @@ class FaceManager:
     def _get_existing_cluster_centroids(self) -> dict:
         """Вычисляет центроиды существующих кластеров."""
         if not self.client: return {}
-        logger.info(f"Инкрементальная кластеризация: извлечение данных существующих кластеров...")
-        clustered_filter = f"{PERSON_ID_FIELD} != '{DEFAULT_PERSON_ID}'"
+        logger.info(f"Инкрементальная кластеризация: извлечение данных существующих кластеров (PersonID!={DEFAULT_PERSON_ID})...")
+        clustered_filter = f"{PERSON_ID_FIELD} != {DEFAULT_PERSON_ID}" # Сравнение с числом
         existing_clusters_raw = query_data(
             self.client, filter_expression=clustered_filter,
             output_fields=[PERSON_ID_FIELD, EMBEDDING_FIELD], limit=None
@@ -284,62 +281,76 @@ class FaceManager:
             
         return existing_centroids
 
-    def _get_next_person_id(self, existing_person_ids: set[str]) -> int:
-        """Определяет следующий числовой ID для нового кластера."""
-        # ... (логика осталась та же) ...
+    def _get_next_person_id(self, existing_person_ids: set[int]) -> int: # existing_person_ids теперь set[int]
         next_person_numeric_id = 1
         if existing_person_ids:
-            max_existing_id = 0
-            for pid_str in existing_person_ids:
-                try:
-                    pid_int = int(pid_str)
-                    if pid_int >= max_existing_id:
-                        max_existing_id = pid_int
-                except ValueError:
-                    logger.warning(f"Не удалось преобразовать PersonID '{pid_str}' в число.")
+            # Поскольку DEFAULT_PERSON_ID (0) может быть в existing_person_ids если мы его не отфильтровали ранее,
+            # или если кто-то вручную так установил, убедимся, что мы ищем максимум среди > 0.
+            # Однако, обычно existing_person_ids приходят из _get_existing_cluster_centroids, где уже отфильтрованы != DEFAULT_PERSON_ID.
+            max_existing_id = 0 
+            for pid_int in existing_person_ids:
+                if pid_int > max_existing_id: # Игнорируем DEFAULT_PERSON_ID (0) и отрицательные, если вдруг появятся
+                    max_existing_id = pid_int
             next_person_numeric_id = max_existing_id + 1
         logger.info(f"Новые PersonID для кластеров начнутся с {next_person_numeric_id}.")
         return next_person_numeric_id
 
     def _perform_dbscan_and_assign_ids(self, entities_to_cluster: list, cluster_eps: float, 
-                                        cluster_min_samples: int, existing_person_ids: set[str]) -> list:
-        """Выполняет DBSCAN и назначает PersonID."""
-        # ... (логика DBSCAN и присвоения ID осталась та же) ...
+                                        min_cluster_size: int, existing_person_ids: set[int],
+                                        hdbscan_min_samples: Optional[int] = None) -> list:
+        """Выполняет HDBSCAN и назначает PersonID."""
         if not entities_to_cluster: return []
 
         pks = [e[PRIMARY_KEY_FIELD] for e in entities_to_cluster]
-        face_ids = [e[FACE_ID_FIELD] for e in entities_to_cluster]
         embeddings_list = [e[EMBEDDING_FIELD] for e in entities_to_cluster]
         embeddings_np = np.array(embeddings_list)
 
-        logger.info(f"Выполнение DBSCAN (eps={cluster_eps}, min_samples={cluster_min_samples}) для {len(embeddings_np)} векторов...")
-        dbscan = DBSCAN(eps=cluster_eps, min_samples=cluster_min_samples, metric='cosine', n_jobs=-1)
-        labels = dbscan.fit_predict(embeddings_np)
+        hdbscan_params = {
+            "min_cluster_size": min_cluster_size,
+            # "metric": cosine_distances # <--- Старый вариант
+        }
+        if hdbscan_min_samples is not None:
+            hdbscan_params["min_samples"] = hdbscan_min_samples
+
+        # Обертка для cosine_distances, чтобы она принимала два 1D вектора и возвращала скаляр
+        def custom_cosine_metric(u, v):
+            # Преобразуем 1D векторы в 2D массивы (одна строка, N столбцов)
+            u_2d = u.reshape(1, -1)
+            v_2d = v.reshape(1, -1)
+            # cosine_distances возвращает матрицу [[расстояние]], извлекаем скаляр
+            return cosine_distances(u_2d, v_2d)[0][0]
+
+        hdbscan_params["metric"] = custom_cosine_metric
+
+        logger.info(f"Выполнение HDBSCAN (params={hdbscan_params}) для {len(embeddings_np)} векторов...")
+        # HDBSCAN с precomputed метрикой ожидает квадратную матрицу расстояний.
+        # Если мы передаем callable, он должен принимать два 1D-массива и возвращать float.
+        # Поэтому используем embeddings_np напрямую, а HDBSCAN будет вызывать custom_cosine_metric для пар.
+        
+        clusterer = hdbscan.HDBSCAN(**hdbscan_params)
+        labels = clusterer.fit_predict(embeddings_np) # Передаем исходные эмбеддинги
 
         num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         num_noise = np.sum(labels == -1)
         logger.info(f"Кластеризация завершена. Найдено новых кластеров: {num_clusters}, шумовых точек: {num_noise}")
 
-        upsert_data = []
+        upsert_data_list = [] # Переименовал, чтобы не конфликтовать с импортом upsert_data
         person_id_map = {} 
         next_person_numeric_id = self._get_next_person_id(existing_person_ids)
 
         for i, label in enumerate(labels):
-            person_id_to_upsert = DEFAULT_PERSON_ID
+            person_id_to_upsert = DEFAULT_PERSON_ID # Теперь это 0
             if label != -1: 
                 if label not in person_id_map:
                     person_id_map[label] = next_person_numeric_id
                     next_person_numeric_id += 1
-                person_id_numeric = person_id_map[label]
-                person_id_to_upsert = str(person_id_numeric) 
+                person_id_to_upsert = person_id_map[label] # Это уже int
             
-            upsert_data.append({
+            upsert_data_list.append({
                 PRIMARY_KEY_FIELD: pks[i],
-                FACE_ID_FIELD: face_ids[i], 
-                EMBEDDING_FIELD: embeddings_list[i], 
                 PERSON_ID_FIELD: person_id_to_upsert 
             })
-        return upsert_data
+        return upsert_data_list
 
     def _assign_faces_to_existing_clusters(self, unclustered_faces: list, existing_centroids: dict, 
                                             cluster_eps: float) -> tuple[list, list]:
@@ -377,8 +388,8 @@ class FaceManager:
             if assigned_pid is not None and min_dist < cluster_eps:
                 logger.debug(f"Лицо PK {pk} присвоено PersonID {assigned_pid} (расстояние: {min_dist:.4f})")
                 assigned_data_for_upsert.append({
-                    PRIMARY_KEY_FIELD: pk, FACE_ID_FIELD: face_data[FACE_ID_FIELD],
-                    EMBEDDING_FIELD: face_data[EMBEDDING_FIELD], PERSON_ID_FIELD: assigned_pid
+                    PRIMARY_KEY_FIELD: pk,
+                    PERSON_ID_FIELD: assigned_pid # assigned_pid - это int
                 })
                 processed_pks.add(pk)
             else:
@@ -388,20 +399,21 @@ class FaceManager:
         logger.info(f"{len(assigned_data_for_upsert)} лиц присвоено существующим. {len(remaining_faces_for_dbscan)} осталось для DBSCAN.")
         return assigned_data_for_upsert, remaining_faces_for_dbscan
 
-    def cluster_faces(self, mode: str, cluster_eps: float, cluster_min_samples: int):
+    def cluster_faces(self, mode: str, cluster_eps: float, min_cluster_size: int, hdbscan_min_samples: Optional[int] = None):
         """
         Выполняет кластеризацию лиц в базе данных Milvus.
 
         Args:
             mode: Режим кластеризации ('full' или 'incremental').
-            cluster_eps: Параметр eps для DBSCAN и порог для инкрементального присвоения.
-            cluster_min_samples: Параметр min_samples для DBSCAN.
+            cluster_eps: Порог для инкрементального присвоения к существующим кластерам.
+            min_cluster_size: Минимальный размер кластера для HDBSCAN.
+            hdbscan_min_samples: Параметр min_samples для HDBSCAN (влияет на обработку шума).
         """
         if not self.client:
             logger.error("Milvus client не инициализирован в cluster_faces.")
             return
 
-        logger.info(f"Запуск кластеризации лиц: режим={mode.upper()}, eps={cluster_eps}, min_samples={cluster_min_samples}")
+        logger.info(f"Запуск кластеризации лиц: режим={mode.upper()}, eps (для присвоения)={cluster_eps}, min_cluster_size={min_cluster_size}, hdbscan_min_samples={hdbscan_min_samples}")
         
         all_upsert_data = [] 
 
@@ -412,7 +424,7 @@ class FaceManager:
                     logger.info("Нет данных для полной кластеризации.")
                     return
                 all_upsert_data = self._perform_dbscan_and_assign_ids(
-                    all_entities_data, cluster_eps, cluster_min_samples, set()
+                    all_entities_data, cluster_eps, min_cluster_size, set(), hdbscan_min_samples=hdbscan_min_samples
                 )
 
             elif mode == "incremental":
@@ -425,10 +437,10 @@ class FaceManager:
                 all_upsert_data.extend(assigned_data)
 
                 if remaining_for_dbscan:
-                    logger.info(f"Инкрементальный режим: кластеризация {len(remaining_for_dbscan)} оставшихся лиц...")
+                    logger.info(f"Инкрементальный режим: кластеризация {len(remaining_for_dbscan)} оставшихся лиц с HDBSCAN...")
                     existing_pid_strings = set(existing_centroids.keys())
                     newly_clustered_data = self._perform_dbscan_and_assign_ids(
-                        remaining_for_dbscan, cluster_eps, cluster_min_samples, existing_pid_strings
+                        remaining_for_dbscan, cluster_eps, min_cluster_size, existing_pid_strings, hdbscan_min_samples=hdbscan_min_samples
                     )
                     all_upsert_data.extend(newly_clustered_data)
                 else:

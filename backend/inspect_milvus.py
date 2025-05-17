@@ -5,9 +5,11 @@ from loguru import logger
 # --- Константы (должны совпадать с другими скриптами) ---
 MILVUS_URI = "./milvus_lite.db"
 COLLECTION_NAME = "faces"
-FACE_ID_FIELD = "face_id"
+# FACE_ID_FIELD = "face_id"  # Это поле удалено из схемы
 PERSON_ID_FIELD = "person_id"
 PRIMARY_KEY_FIELD = "pk" 
+PHOTO_ID_FIELD = "photo_id"
+FACE_INDEX_FIELD = "face_index"
 
 # --- Настройка Логгера (вывод в stderr) ---
 logger.remove() # Убираем стандартный обработчик
@@ -26,7 +28,7 @@ def inspect_collection():
              return
 
         # Запрашиваем все записи, извлекая только нужные поля
-        output_fields = [PRIMARY_KEY_FIELD, FACE_ID_FIELD, PERSON_ID_FIELD]
+        output_fields = [PRIMARY_KEY_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD, PERSON_ID_FIELD]
         logger.info(f"Запрос всех записей из '{COLLECTION_NAME}' с полями: {output_fields}...")
         
         # Сначала узнаем общее количество записей
@@ -49,18 +51,19 @@ def inspect_collection():
             logger.info(f"Извлечено {len(results)} записей. Вывод:")
             
             # Выводим заголовок
-            print("-" * 60)
-            print(f"{PRIMARY_KEY_FIELD:<10} | {FACE_ID_FIELD:<30} | {PERSON_ID_FIELD:<15}")
-            print("-" * 60)
+            print("-" * 80)
+            print(f"{PRIMARY_KEY_FIELD:<10} | {PHOTO_ID_FIELD:<10} | {FACE_INDEX_FIELD:<10} | {PERSON_ID_FIELD:<15}")
+            print("-" * 80)
             
             # Выводим данные
             for entity in results:
                  pk_val = entity.get(PRIMARY_KEY_FIELD, 'N/A')
-                 face_id_val = entity.get(FACE_ID_FIELD, 'N/A')
+                 photo_id_val = entity.get(PHOTO_ID_FIELD, 'N/A')
+                 face_index_val = entity.get(FACE_INDEX_FIELD, 'N/A')
                  person_id_val = entity.get(PERSON_ID_FIELD, 'N/A')
-                 print(f"{str(pk_val):<10} | {face_id_val:<30} | {str(person_id_val):<15}")
+                 print(f"{str(pk_val):<10} | {str(photo_id_val):<10} | {str(face_index_val):<10} | {str(person_id_val):<15}")
             
-            print("-" * 60)
+            print("-" * 80)
 
         except Exception as query_e:
             logger.error(f"Ошибка при извлечении данных: {query_e}")

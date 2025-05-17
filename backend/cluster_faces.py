@@ -6,8 +6,9 @@ import sys
 from face_manager import FaceManager
 
 # --- Константы (Параметры по умолчанию для argparse) ---
-DEFAULT_CLUSTER_EPS = 0.4  
-DEFAULT_CLUSTER_MIN_SAMPLES = 2 
+DEFAULT_CLUSTER_EPS = 0.35
+DEFAULT_MIN_CLUSTER_SIZE = 3
+DEFAULT_HDBSCAN_MIN_SAMPLES = 3
 LOG_FILE = "cluster_faces.log"
 
 # --- Настройка Логгера (такая же, как была) ---
@@ -31,13 +32,19 @@ if __name__ == "__main__":
         "--eps",
         type=float,
         default=DEFAULT_CLUSTER_EPS, 
-        help=f"Параметр eps для DBSCAN (макс. косинусное расстояние). По умолчанию: {DEFAULT_CLUSTER_EPS}"
+        help=f"Параметр eps для инкрементального присвоения к существующим кластерам. По умолчанию: {DEFAULT_CLUSTER_EPS}"
     )
     parser.add_argument(
-        "--min_samples",
+        "--min_cluster_size",
         type=int,
-        default=DEFAULT_CLUSTER_MIN_SAMPLES, 
-        help=f"Параметр min_samples для DBSCAN (мин. точек в кластере). По умолчанию: {DEFAULT_CLUSTER_MIN_SAMPLES}"
+        default=DEFAULT_MIN_CLUSTER_SIZE,
+        help=f"Параметр min_cluster_size для HDBSCAN (минимальный размер кластера). По умолчанию: {DEFAULT_MIN_CLUSTER_SIZE}"
+    )
+    parser.add_argument(
+        "--hdbscan_min_samples",
+        type=int,
+        default=DEFAULT_HDBSCAN_MIN_SAMPLES,
+        help=f"Параметр min_samples для HDBSCAN (влияет на обработку шума, обычно равен min_cluster_size если None). По умолчанию: {DEFAULT_HDBSCAN_MIN_SAMPLES}"
     )
     # Можно добавить параметры для модели/детектора, если нужно переопределить
     # parser.add_argument("--model", type=str, help="Модель DeepFace (если отличается от FaceManager по умолчанию)")
@@ -59,6 +66,6 @@ if __name__ == "__main__":
          sys.exit(1)
          
     # Запускаем кластеризацию через метод менеджера
-    face_manager.cluster_faces(args.mode, args.eps, args.min_samples)
+    face_manager.cluster_faces(args.mode, args.eps, args.min_cluster_size, args.hdbscan_min_samples)
 
     logger.info(f"Скрипт cluster_faces.py (режим {args.mode}) завершил работу.") 

@@ -6,9 +6,9 @@ opencv-python # или opencv-python-headless, если не нужна GUI-ча
 deepface
 aiohttp
 loguru
-fastapi
-python-multipart
-uvicorn[standard]
+fastapi>=0.115.0
+python-multipart>=0.0.9
+uvicorn[standard]>=0.30.0
 opencv-contrib-python
 mediapipe
 facenet-pytorch

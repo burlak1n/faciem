@@ -40,7 +40,6 @@ def init_milvus_connection() -> Collection:
 
             schema = CollectionSchema(
                 fields=[field_id, field_embedding, field_photo_id, field_face_index],
-                description="Коллекция эмбеддингов лиц с фотографий VK,关联 photo_id",
                 enable_dynamic_field=False
             )
             collection = Collection(config.MILVUS_COLLECTION_NAME, schema=schema)

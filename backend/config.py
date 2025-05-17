@@ -102,7 +102,7 @@ MODEL_CONFIGS = {
 
 # --- Активная конфигурация модели (можно выбрать одну из MODEL_CONFIGS) ---
 # Устанавливаем одну из конфигураций как активную по умолчанию
-ACTIVE_MODEL_CONFIG_NAME = "ssd_facenet512_cosine"
+ACTIVE_MODEL_CONFIG_NAME = "ghost_opencv_cosine_unaligned"
 ACTIVE_MODEL_CONFIG = MODEL_CONFIGS[ACTIVE_MODEL_CONFIG_NAME]
 
 # Переопределяем основные настройки на основе активной конфигурации

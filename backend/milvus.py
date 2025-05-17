@@ -7,21 +7,26 @@ from pymilvus import (
     MilvusClient
 )
 from loguru import logger
+import os
 
 # --- Константы Milvus ---
 MILVUS_ALIAS = "default"
-MILVUS_URI = "./milvus_lite.db" 
+MILVUS_URI = os.getenv("MILVUS_URI", "./milvus_lite.db") 
 COLLECTION_NAME = "faces"
-FACE_ID_FIELD = "face_id"
+# FACE_ID_FIELD = "face_id" # Удалено
 EMBEDDING_FIELD = "embedding"
-PERSON_ID_FIELD = "person_id"
-PRIMARY_KEY_FIELD = "pk"
-DEFAULT_PERSON_ID = "-1"
+PERSON_ID_FIELD = "person_id"   # Теперь INT64
+PHOTO_ID_FIELD = "photo_id"
+FACE_INDEX_FIELD = "face_index" 
+PRIMARY_KEY_FIELD = "pk" 
+DEFAULT_PERSON_ID = 0             # Изменено на 0 (INT64)
 EMBEDDING_DIM = 512 
 INDEX_TYPE = "IVF_FLAT"
-METRIC_TYPE = "IP"
+METRIC_TYPE = "IP" 
 NLIST_PARAM = 128 
 NPROBE_PARAM = 16
+DEFAULT_SEARCH_TOP_K = 10
+DEFAULT_SIMILARITY_THRESHOLD = 300
 
 # Настройка логгера (если еще не настроен глобально)
 # logger.add(sys.stderr, level="INFO") 
@@ -49,12 +54,14 @@ def setup_milvus() -> MilvusClient | None:
         if not has_collection:
             logger.info(f"Коллекция '{COLLECTION_NAME}' не найдена. Создание...")
             fields = [
-                FieldSchema(name=FACE_ID_FIELD, dtype=DataType.VARCHAR, is_primary=False, max_length=255),
+                # FieldSchema(name=FACE_ID_FIELD, dtype=DataType.VARCHAR, max_length=255), # Удалено
                 FieldSchema(name=EMBEDDING_FIELD, dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
-                FieldSchema(name=PERSON_ID_FIELD, dtype=DataType.VARCHAR, max_length=255, default_value=DEFAULT_PERSON_ID),
+                FieldSchema(name=PERSON_ID_FIELD, dtype=DataType.INT64),
+                FieldSchema(name=PHOTO_ID_FIELD, dtype=DataType.INT64),
+                FieldSchema(name=FACE_INDEX_FIELD, dtype=DataType.INT8),
                 FieldSchema(name=PRIMARY_KEY_FIELD, dtype=DataType.INT64, is_primary=True, auto_id=True)
             ]
-            schema = CollectionSchema(fields=fields, description="База данных эмбеддингов лиц")
+            schema = CollectionSchema(fields=fields)
             client.create_collection(collection_name=COLLECTION_NAME, schema=schema)
             logger.info(f"Коллекция '{COLLECTION_NAME}' успешно создана.")
 
@@ -112,14 +119,14 @@ def setup_milvus() -> MilvusClient | None:
         logger.error(f"Ошибка при настройке коллекции/индекса Milvus: {e}", exc_info=True)
         return None
 
-def get_cluster_members(client: MilvusClient, person_ids: set[str]) -> dict:
+def get_cluster_members(client: MilvusClient, person_ids: set[int]) -> dict:
     """Получает всех членов заданных кластеров (PersonID)."""
     cluster_members = {} 
     if not person_ids:
         return cluster_members
 
     logger.info(f"Получение всех членов для PersonIDs: {person_ids}")
-    pids_list_str = ", ".join([f'\"{pid}\"' for pid in person_ids])
+    pids_list_str = ", ".join([str(pid) for pid in person_ids])
     person_id_filter = f'{PERSON_ID_FIELD} in [{pids_list_str}]'
     logger.debug(f"Фильтр для запроса членов кластера: {person_id_filter}")
 
@@ -136,7 +143,7 @@ def get_cluster_members(client: MilvusClient, person_ids: set[str]) -> dict:
             all_members_results = client.query(
                  collection_name=COLLECTION_NAME,
                  filter=person_id_filter,
-                 output_fields=[PRIMARY_KEY_FIELD, FACE_ID_FIELD, PERSON_ID_FIELD],
+                 output_fields=[PRIMARY_KEY_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD, PERSON_ID_FIELD],
                  limit=limit 
             )
         
@@ -145,7 +152,8 @@ def get_cluster_members(client: MilvusClient, person_ids: set[str]) -> dict:
             pid = member_entity[PERSON_ID_FIELD]
             member_data = {
                 "pk": member_entity[PRIMARY_KEY_FIELD],
-                "face_id": member_entity[FACE_ID_FIELD],
+                "photo_id": member_entity[PHOTO_ID_FIELD],
+                "face_index": member_entity[FACE_INDEX_FIELD],
                 "person_id": pid
             }
             cluster_members.setdefault(pid, []).append(member_data)
@@ -167,25 +175,74 @@ def insert_data(client: MilvusClient, data_list: list[dict]) -> list | None:
         return []
     
     try:
-        collection = Collection(name=COLLECTION_NAME, using=MILVUS_ALIAS)
+        # Проверим, что все записи содержат ожидаемые поля и корректные типы
+        required_fields = {EMBEDDING_FIELD, PERSON_ID_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD}
+        for item_idx, item in enumerate(data_list):
+            if not required_fields.issubset(item.keys()):
+                logger.error(f"Запись {item_idx} для вставки не содержит все необходимые поля ({required_fields}). Проверьте ключи: {item.keys()}. Запись: {item}")
+                return None
+
+            # Type checks for integer fields
+            for field_name in [PERSON_ID_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD]:
+                value = item.get(field_name)
+                if not isinstance(value, int):
+                    logger.error(f"Запись {item_idx}: Поле '{field_name}' (значение: {value}, тип: {type(value)}) должно быть int. Запись: {item}")
+                    return None
         
-        num_entities = len(data_list)
-        face_ids = [item[FACE_ID_FIELD] for item in data_list]
-        embeddings = [item[EMBEDDING_FIELD] for item in data_list]
-        person_ids = [item.get(PERSON_ID_FIELD, DEFAULT_PERSON_ID) for item in data_list]
+        logger.debug(f"Попытка вставки {len(data_list)} записей через client.insert...")
+        res = client.insert(collection_name=COLLECTION_NAME, data=data_list)
         
-        data_for_collection_insert = [face_ids, embeddings, person_ids]
-        
-        logger.debug(f"Попытка вставки {len(data_list)} записей через collection.insert...")
-        res = collection.insert(data=data_for_collection_insert)
-        logger.info(f"{len(data_list)} записей успешно вставлено. PKs: {res.primary_keys}")
-        
-        collection.flush()
-        logger.debug("Выполнен flush коллекции.")
-        
-        return res.primary_keys
+        insert_count_val = None
+        primary_keys_val = None
+
+        # Пытаемся получить insert_count
+        if hasattr(res, 'insert_count'):
+            insert_count_val = res.insert_count
+        elif isinstance(res, dict) and 'insert_count' in res:
+            insert_count_val = res['insert_count']
+
+        # Пытаемся получить primary_keys или ids
+        if hasattr(res, 'primary_keys'):
+            primary_keys_val = res.primary_keys
+        elif isinstance(res, dict) and 'ids' in res:
+            primary_keys_val = res['ids'] # Ключ 'ids' для OmitZeroDict/dict
+        elif isinstance(res, dict) and 'primary_keys' in res: # Запасной вариант для dict
+            primary_keys_val = res['primary_keys']
+
+        if insert_count_val is not None and primary_keys_val is not None:
+            logger.info(f"{insert_count_val} записей успешно вставлено. PKs: {primary_keys_val}")
+            return primary_keys_val
+        else:
+            # Это случай, когда client.insert() вернул что-то неожиданное
+            error_message = (
+                f"Результат client.insert() не содержит ожидаемые атрибуты/ключи ('insert_count', 'primary_keys'/'ids'). "
+                f"Тип результата: {type(res)}, Содержимое (до 500 символов): {str(res)[:500]}"
+            )
+            logger.error(error_message)
+            # Попытка извлечь детали ошибки, если это объект ошибки Milvus
+            if hasattr(res, 'code') and hasattr(res, 'message'):
+                 logger.error(f"Возможно, это объект ошибки Milvus: code={getattr(res, 'code', 'N/A')}, message='{getattr(res, 'message', 'N/A')}'")
+            elif isinstance(res, dict): # OmitZeroDict может быть словарем
+                 logger.error(f"Содержимое словаря результата: {res}")
+
+            # Возвращаем None, так как вставка не была подтверждена как успешная
+            return None
+
+    except AttributeError as ae:
+        # Этот блок теперь менее вероятен, если предыдущая проверка hasattr ловит проблему,
+        # но оставлен для непредвиденных случаев AttributeError.
+        logger.error(f"AttributeError при доступе к результатам вставки: {ae}. "
+                     f"Это может означать, что 'res' не является ожидаемым объектом MutationResult. "
+                     f"Тип res: {type(res)}, Содержимое res (если доступно): {str(getattr(res, '__dict__', res))[:500]}", exc_info=True)
+        return None
     except Exception as e:
-        logger.error(f"Ошибка при вставке данных в Milvus: {e}", exc_info=True)
+        logger.error(f"Ошибка при вставке данных в Milvus или обработке результата: {e}", exc_info=True)
+        # Попытка логировать 'res', если оно было присвоено до исключения
+        try:
+            if 'res' in locals():
+                logger.error(f"Состояние 'res' на момент исключения: Тип: {type(res)}, Содержимое: {str(res)[:500]}")
+        except Exception as log_res_e:
+            logger.error(f"Не удалось залогировать 'res' при обработке исключения: {log_res_e}")
         return None
 
 def search_data(client: MilvusClient, query_vectors: list[list[float]], top_k: int) -> list[list[dict]]:
@@ -206,7 +263,7 @@ def search_data(client: MilvusClient, query_vectors: list[list[float]], top_k: i
             metric_type=METRIC_TYPE,
             params=search_params,
             limit=top_k,
-            output_fields=[PRIMARY_KEY_FIELD, FACE_ID_FIELD, PERSON_ID_FIELD]
+            output_fields=[PRIMARY_KEY_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD, PERSON_ID_FIELD]
         )
         return results
     except Exception as e:
@@ -218,7 +275,8 @@ def query_data(client: MilvusClient, filter_expression: str = "", output_fields:
     Возвращает список словарей с результатами или пустой список.
     """
     if output_fields is None:
-        output_fields = [PRIMARY_KEY_FIELD, FACE_ID_FIELD, PERSON_ID_FIELD]
+        # Обновляем поля по умолчанию
+        output_fields = [PRIMARY_KEY_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD, PERSON_ID_FIELD, EMBEDDING_FIELD] 
         
     try:
         if limit is None:
@@ -250,25 +308,80 @@ def upsert_data(client: MilvusClient, data_list: list[dict], batch_size: int = 5
     
     logger.info(f"Подготовлено {len(data_list)} записей для Upsert в Milvus.")
     success = False
+    
     try:
-        for i in range(0, len(data_list), batch_size):
-            batch = data_list[i:i + batch_size]
-            num_batches = (len(data_list) + batch_size - 1) // batch_size
+        # Убедимся, что соединение для Collection API есть
+        if not connections.has_connection(MILVUS_ALIAS):
+             connections.connect(alias=MILVUS_ALIAS, uri=MILVUS_URI)
+             logger.info(f"Низкоуровневое соединение '{MILVUS_ALIAS}' установлено для Upsert.")
+        
+        # Получаем полную информацию для каждой записи, включая embedding
+        complete_data_list = []
+        for item in data_list:
+            if PRIMARY_KEY_FIELD not in item:
+                logger.error(f"Upsert: запись не содержит обязательное поле '{PRIMARY_KEY_FIELD}': {item}")
+                return False
+            
+            pk_value = item[PRIMARY_KEY_FIELD]
+            
+            # Если embedding отсутствует, запрашиваем все данные для этой записи
+            if EMBEDDING_FIELD not in item:
+                try:
+                    pk_filter = f"{PRIMARY_KEY_FIELD} == {pk_value}"
+                    original_record = client.query(
+                        collection_name=COLLECTION_NAME,
+                        filter=pk_filter,
+                        output_fields=[EMBEDDING_FIELD, PHOTO_ID_FIELD, FACE_INDEX_FIELD],
+                        limit=1
+                    )
+                    
+                    if not original_record:
+                        logger.error(f"Не найдена запись с {PRIMARY_KEY_FIELD}={pk_value} для получения embedding")
+                        continue
+                        
+                    # Добавляем все необходимые поля из оригинальной записи
+                    complete_item = item.copy()  # Сохраняем указанные поля (например, PERSON_ID_FIELD)
+                    
+                    # Добавляем embedding и другие обязательные поля
+                    complete_item[EMBEDDING_FIELD] = original_record[0][EMBEDDING_FIELD]
+                    
+                    # Добавляем остальные поля, если их нет в item
+                    if PHOTO_ID_FIELD not in complete_item and PHOTO_ID_FIELD in original_record[0]:
+                        complete_item[PHOTO_ID_FIELD] = original_record[0][PHOTO_ID_FIELD]
+                    
+                    if FACE_INDEX_FIELD not in complete_item and FACE_INDEX_FIELD in original_record[0]:
+                        complete_item[FACE_INDEX_FIELD] = original_record[0][FACE_INDEX_FIELD]
+                    
+                    complete_data_list.append(complete_item)
+                except Exception as e:
+                    logger.error(f"Ошибка при получении данных для записи {pk_value}: {e}")
+                    continue
+            else:
+                # Если embedding уже есть, просто используем запись как есть
+                complete_data_list.append(item)
+        
+        if not complete_data_list:
+            logger.error("Нет данных для upsert после получения полной информации")
+            return False
+        
+        logger.info(f"Подготовлено {len(complete_data_list)} полных записей для Upsert")     
+             
+        collection = Collection(name=COLLECTION_NAME, using=MILVUS_ALIAS)
+        for i in range(0, len(complete_data_list), batch_size):
+            batch = complete_data_list[i:i + batch_size]
+            num_batches = (len(complete_data_list) + batch_size - 1) // batch_size
             current_batch_num = i // batch_size + 1
             logger.debug(f"Upsert батча {current_batch_num} / {num_batches} (размер {len(batch)})...)")
-            # Используем низкоуровневый Collection для upsert, т.к. MilvusClient его не имеет (на момент написания)
-            # Если в будущем появится client.upsert(), можно перейти на него.
-            collection = Collection(name=COLLECTION_NAME, using=MILVUS_ALIAS)
-            res = collection.upsert(data=batch)
-            # Проверка результата upsert может быть специфична для версии Milvus
-            # logger.debug(f"Результат Upsert батча {current_batch_num}: {res}") 
-            success = True # Хотя бы один батч прошел
+            for item in batch:
+                if PERSON_ID_FIELD in item and not isinstance(item[PERSON_ID_FIELD], int):
+                    logger.error(f"Upsert: Поле '{PERSON_ID_FIELD}' ({item[PERSON_ID_FIELD]}) должно быть int. Запись: {item}")
+                    # return False # Строгая проверка
+            res = collection.upsert(data=batch) # Upsert ожидает, что в batch есть PK
+            success = True 
 
-        # Флашим после всех батчей
-        collection = Collection(name=COLLECTION_NAME, using=MILVUS_ALIAS)
         collection.flush()
         logger.debug("Выполнен flush коллекции после Upsert.")
-        logger.info(f"Upsert {len(data_list)} записей завершен.")
+        logger.info(f"Upsert {len(complete_data_list)} записей завершен.")
         return success
     except Exception as e:
         logger.error(f"Ошибка при выполнении Upsert в Milvus: {e}", exc_info=True)

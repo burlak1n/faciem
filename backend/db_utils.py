@@ -1,6 +1,8 @@
 import sqlite3
 from typing import Optional, Any, List, Dict, Generator
 from loguru import logger
+import os
+from fastapi import HTTPException
 
 # Предполагается, что config.py находится в том же каталоге или доступен через PYTHONPATH
 try:
@@ -124,3 +126,89 @@ def get_urls_for_photo_ids(
             conn.close()
             
     return results
+
+def get_groups_list() -> List[Dict[str, str]]:
+    """
+    Извлекает список групп (screen_name) из SQLite.
+    """
+    db_path = getattr(config, 'URL_FILE_PATH', None)
+    if not db_path or not os.path.exists(db_path):
+        print(f"[API_ERROR /api/groups] SQLite DB path not configured or file not found: {db_path}")
+        raise HTTPException(status_code=500, detail="База данных не найдена на сервере")
+
+    groups = []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        # Используем screen_name и как id, и как name
+        cursor.execute("SELECT screen_name FROM groups ORDER BY screen_name") 
+        for row in cursor:
+            if row and row[0]:
+                groups.append({"id": str(row[0]), "name": str(row[0])})
+    except sqlite3.Error as e:
+        print(f"[API_ERROR /api/groups] SQLite error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных при получении списка групп: {e}")
+    except Exception as e_gen:
+        print(f"[API_ERROR /api/groups] General error: {e_gen}")
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {e_gen}")
+    finally:
+        if conn:
+            conn.close()
+    
+    print(f"[API_DEBUG /api/groups] Returning {len(groups)} groups.")
+    return groups
+
+def get_albums_for_group(group_id: str) -> List[Dict[str, Any]]:
+    """
+    Извлекает список альбомов для указанной группы из SQLite.
+    ВРЕМЕННО: Проверка статуса в Milvus удалена.
+    """
+    db_path = getattr(config, 'URL_FILE_PATH', None)
+    if not db_path or not os.path.exists(db_path):
+        print(f"[API_ERROR /api/albums/{group_id}] SQLite DB path not configured or file not found: {db_path}")
+        raise HTTPException(status_code=500, detail="База данных не найдена на сервере")
+
+    albums = []
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Получаем альбомы
+        cursor.execute(
+            "SELECT id, title, size FROM albums WHERE group_screen_name = ? ORDER BY updated", 
+            (group_id,)
+        )
+        
+        album_rows = cursor.fetchall()
+        
+        for row in album_rows:
+            if row and row[0] is not None and row[1] is not None:
+                album_id = row[0]
+                
+                # --- Начало удаленного блока проверки Milvus ---
+                # processed_photos_count = 0 
+                # В реальной реализации здесь была бы проверка статуса в Milvus
+                # для подсчета processed_photos_count
+                # --- Конец удаленного блока проверки Milvus ---
+                
+                albums.append({
+                    "id": album_id,
+                    "title": str(row[1]),
+                    "size": row[2] if row[2] is not None else 0,
+                    # "processed_count": processed_photos_count # Временно убрано
+                })
+                
+    except sqlite3.Error as e:
+        print(f"[API_ERROR /api/albums/{group_id}] SQLite error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка базы данных при получении списка альбомов: {e}")
+    except Exception as e_gen:
+        print(f"[API_ERROR /api/albums/{group_id}] General error: {e_gen}")
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {e_gen}")
+    finally:
+        if conn:
+            conn.close()
+            
+    print(f"[API_DEBUG /api/albums/{group_id}] Returning {len(albums)} albums.")
+    return albums
